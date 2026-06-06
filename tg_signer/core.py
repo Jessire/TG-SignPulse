@@ -1508,6 +1508,12 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         self.log(
                             f"正在执行{self._current_action_step_label()}：{action_description}"
                         )
+                        before_action_state = await self._chat_state_snapshot(
+                            chat,
+                            history_limit=_read_positive_int_env(
+                                "SIGN_TASK_HISTORY_LOOKBACK", 12, 3
+                            ),
+                        )
                         if action_delay > 0:
                             await asyncio.sleep(action_delay)
                         next_action = (
@@ -1517,6 +1523,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             chat,
                             action,
                             next_action=next_action,
+                            before_action_state=before_action_state,
                         )
                         if result is False:
                             raise RuntimeError(
@@ -2079,7 +2086,9 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         if isinstance(action, ReplyByCalculationProblemAction):
             return bool(message.text or message.caption)
         if isinstance(action, ReplyByImageRecognitionAction):
-            return bool(message.photo)
+            # Images with keyboards are usually menus or option challenges. Text
+            # reply OCR should wait for a plain image; use action 4 for buttons.
+            return bool(message.photo and not self._collect_clickable_buttons(message))
         if isinstance(action, ClickButtonByCalculationProblemAction):
             return bool((message.text or message.caption) and reply_markup)
         return False
@@ -2211,6 +2220,13 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             "您今日已签到",
             "签到过了",
             "重复签到",
+            "签到机会已用完",
+            "机会已用完",
+            "今天不能再签到",
+            "今日不能再签到",
+            "不能再签到了",
+            "回答超时",
+            "请明天再试",
             "任务完成",
             "执行完成",
             "操作完成",
@@ -2621,6 +2637,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         timeout=None,
         *,
         next_action: Optional[ActionT] = None,
+        before_action_state: Optional[dict[int, tuple]] = None,
     ):
         if timeout is None:
             timeout = _read_positive_float_env("SIGN_TASK_ACTION_TIMEOUT", 25.0, 5.0)
@@ -2635,6 +2652,14 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             self.log("关键词监听通知动作为后台常驻监听配置，当前运行时跳过")
             return True
         history_limit = _read_positive_int_env("SIGN_TASK_HISTORY_LOOKBACK", 12, 3)
+        before_action_state = before_action_state or {}
+
+        def is_new_or_changed_message(message: Optional[Message]) -> bool:
+            if message is None:
+                return False
+            message_id = getattr(message, "id", None)
+            return before_action_state.get(message_id) != self._message_state_marker(message)
+
         self.context.waiter.add(chat.chat_id)
         start = time.perf_counter()
         last_message = None
@@ -2822,6 +2847,12 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         continue
                     self.context.waiting_message = message
                     self._log_received_target_message(message)
+                    if not is_new_or_changed_message(message):
+                        continue
+                    if self._message_has_terminal_success_text(message):
+                        self.context.stop_after_current_action = True
+                        self.context.stop_reason = self._summarize_target_message(message)
+                        return None
                     ok = False
                     if isinstance(action, ClickKeyboardByTextAction):
                         ok = await self._click_keyboard_by_text(
@@ -2856,6 +2887,12 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     self.log("等待超时，尝试从最近消息回退处理当前步骤", level="WARNING")
                     async for message in self.app.get_chat_history(chat.chat_id, limit=history_limit):
                         self._log_received_target_message(message)
+                        if not is_new_or_changed_message(message):
+                            continue
+                        if self._message_has_terminal_success_text(message):
+                            self.context.stop_after_current_action = True
+                            self.context.stop_reason = self._summarize_target_message(message)
+                            return None
                         if isinstance(action, ClickKeyboardByTextAction):
                             ok = await self._click_keyboard_by_text(
                                 action,
