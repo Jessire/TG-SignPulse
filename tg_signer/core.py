@@ -2531,6 +2531,9 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
     ):
         if not message.photo:
             return False
+        if self._collect_clickable_buttons(message):
+            self.log("跳过带按钮的图片消息，等待真正的验证码/题目图片")
+            return False
         self._log_received_target_message(message)
         self.log("AI 正在分析图片中的文字")
         image_buffer: BinaryIO = await self.app.download_media(
@@ -2653,10 +2656,21 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             return True
         history_limit = _read_positive_int_env("SIGN_TASK_HISTORY_LOOKBACK", 12, 3)
         before_action_state = before_action_state or {}
+        allow_existing_candidate = isinstance(
+            action,
+            (
+                ReplyByCalculationProblemAction,
+                ChooseOptionByImageAction,
+                ReplyByImageRecognitionAction,
+                ClickButtonByCalculationProblemAction,
+            ),
+        )
 
         def is_new_or_changed_message(message: Optional[Message]) -> bool:
             if message is None:
                 return False
+            if allow_existing_candidate and self._message_supports_next_action(action, message):
+                return True
             message_id = getattr(message, "id", None)
             return before_action_state.get(message_id) != self._message_state_marker(message)
 
