@@ -425,7 +425,7 @@ class AITools:
             model=model,
             messages=messages,
             temperature=temperature,
-            max_tokens=24,
+            max_tokens=2048,
             expect_json=True,
         )
         message = completion.choices[0].message
@@ -476,7 +476,7 @@ class AITools:
             model=model,
             messages=messages,
             temperature=temperature,
-            max_tokens=32,
+            max_tokens=2048,
             expect_json=True,
         )
         result = json_repair.loads(completion.choices[0].message.content)
