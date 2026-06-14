@@ -1566,11 +1566,10 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 if flow_attempt >= max_flow_attempts:
                     break
                 backoff_info = f"，从第 {max(1, last_successful_index - retry_backoff_steps)} 步继续" if last_successful_index > 1 else "，将从第 1 步重新开始"
-                # Intermediate retry failures are recoverable; keep them at info
-                # level so successful GitHub Actions runs do not surface warnings.
                 self.log(
                     f"脚本流程第 {flow_attempt}/{max_flow_attempts} 次尝试失败"
-                    f"{backoff_info}: {exc}"
+                    f"{backoff_info}: {exc}",
+                    level="WARNING",
                 )
                 await asyncio.sleep(max(float(chat.action_interval or 0), 1.0))
 
