@@ -87,10 +87,11 @@ class _FakeCompletions:
         return response
 
 
-class AIToolsJsonModeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_choose_options_by_image_does_not_request_json_mode(self):
+class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_choose_options_by_image_retries_without_json_mode(self):
         fake_completions = _FakeCompletions(
             [
+                RuntimeError("Error code: 403 - {'message': 'openai_error', 'code': 'bad_response_status_code', 'detail': 'response_format json_object unsupported'}"),
                 SimpleNamespace(
                     choices=[
                         SimpleNamespace(
@@ -113,5 +114,5 @@ class AIToolsJsonModeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, [2])
-        self.assertEqual(len(fake_completions.calls), 1)
-        self.assertNotIn("response_format", fake_completions.calls[0])
+        self.assertIn("response_format", fake_completions.calls[0])
+        self.assertNotIn("response_format", fake_completions.calls[1])
