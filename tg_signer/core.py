@@ -2802,6 +2802,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             self.context.stop_after_current_action = True
                             self.context.stop_reason = self._summarize_target_message(message)
                             return True
+                        if (
+                            next_action is not None
+                            and is_new_or_changed_message(message)
+                            and self._message_supports_next_action(next_action, message)
+                        ):
+                            self._remember_next_action_candidate(chat, message)
+                            self.log(
+                                f"已检测到下一步动作可执行，跳过等待按钮：{action.text}"
+                            )
+                            return True
 
                         before_click_state: dict[int, tuple] = {}
 
@@ -2887,6 +2897,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 if self._message_is_today_terminal_success(message):
                                     self.context.stop_after_current_action = True
                                     self.context.stop_reason = self._summarize_target_message(message)
+                                    return True
+                                if (
+                                    next_action is not None
+                                    and is_new_or_changed_message(message)
+                                    and self._message_supports_next_action(next_action, message)
+                                ):
+                                    self._remember_next_action_candidate(chat, message)
+                                    self.log(
+                                        f"已检测到下一步动作可执行，跳过等待按钮：{action.text}"
+                                    )
                                     return True
 
                                 before_click_state: dict[int, tuple] = {}
