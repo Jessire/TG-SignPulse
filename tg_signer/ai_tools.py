@@ -356,7 +356,10 @@ class AITools:
             return image
 
         prepared = cls._crop_light_border(prepared)
-        if os.environ.get("PADDLEOCR_TEXT_DENOISE", "true").lower() not in {
+        yellow_mask = cls._extract_yellow_text_mask(prepared)
+        if yellow_mask is not None:
+            prepared = yellow_mask
+        elif os.environ.get("PADDLEOCR_TEXT_DENOISE", "true").lower() not in {
             "0",
             "false",
             "no",
@@ -391,6 +394,28 @@ class AITools:
         output = io.BytesIO()
         prepared.save(output, format="PNG", optimize=True)
         return output.getvalue()
+
+    @staticmethod
+    def _extract_yellow_text_mask(image: "Image.Image") -> "Image.Image | None":
+        width, height = image.size
+        mask_data = []
+        black_pixels = 0
+        for red, green, blue in image.convert("RGB").getdata():
+            is_text = red > 130 and green > 110 and blue < 190 and red + green - blue > 180
+            if is_text:
+                mask_data.append(0)
+                black_pixels += 1
+            else:
+                mask_data.append(255)
+
+        pixel_count = max(width * height, 1)
+        if black_pixels / pixel_count < 0.01:
+            return None
+
+        mask = Image.new("L", image.size, 255)
+        mask.putdata(mask_data)
+        mask = mask.filter(ImageFilter.MedianFilter(3))
+        return ImageOps.autocontrast(mask)
 
     @staticmethod
     def _format_option_lines(options: list[tuple[int, str]]) -> str:

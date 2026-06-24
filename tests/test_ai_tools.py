@@ -75,6 +75,18 @@ class AIToolsOptionParsingTest(unittest.TestCase):
             self.assertGreaterEqual(prepared_image.width, 480)
             self.assertGreaterEqual(prepared_image.height, 150)
 
+    def test_extract_yellow_text_mask_keeps_yellow_captcha_text(self):
+        image = Image.new("RGB", (80, 30), (80, 55, 150))
+        for x in range(10, 30):
+            for y in range(6, 24):
+                image.putpixel((x, y), (230, 210, 70))
+
+        mask = AITools._extract_yellow_text_mask(image)
+
+        self.assertIsNotNone(mask)
+        self.assertEqual(mask.getpixel((15, 10)), 0)
+        self.assertEqual(mask.getpixel((60, 10)), 255)
+
     def test_timeout_is_treated_as_transient_ai_error(self):
         self.assertTrue(AITools._should_retry_transient_ai_error(TimeoutError()))
 
