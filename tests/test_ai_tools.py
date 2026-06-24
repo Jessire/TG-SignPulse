@@ -146,9 +146,12 @@ class OpenAIConfigManagerTest(unittest.TestCase):
             },
             clear=True,
         ):
-            cfg = OpenAIConfigManager(workdir).load_config()
+            manager = OpenAIConfigManager(workdir)
+            cfg = manager.load_config()
 
-        self.assertEqual(cfg, {})
+            self.assertTrue(manager.has_config())
+
+        self.assertEqual(cfg, {"api_key": ""})
 
 
 if __name__ == "__main__":

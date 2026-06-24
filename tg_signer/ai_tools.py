@@ -122,7 +122,7 @@ class OpenAIConfigManager:
         # 环境变量优先
         if self.has_env_config():
             if not os.environ.get("OPENAI_API_KEY"):
-                return OpenAIConfig()
+                return OpenAIConfig(api_key="")
             return OpenAIConfig(
                 api_key=os.environ["OPENAI_API_KEY"],
                 base_url=os.environ.get("OPENAI_BASE_URL"),
