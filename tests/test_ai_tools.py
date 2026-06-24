@@ -57,6 +57,14 @@ class AIToolsOptionParsingTest(unittest.TestCase):
     def test_timeout_is_treated_as_transient_ai_error(self):
         self.assertTrue(AITools._should_retry_transient_ai_error(TimeoutError()))
 
+    def test_quota_exhaustion_is_not_retried_as_transient_error(self):
+        error = RuntimeError(
+            "Error code: 429 - {'error': {'status': 'RESOURCE_EXHAUSTED', "
+            "'message': 'You exceeded your current quota, free_tier'}}"
+        )
+
+        self.assertFalse(AITools._should_retry_transient_ai_error(error))
+
 
 if __name__ == "__main__":
     unittest.main()

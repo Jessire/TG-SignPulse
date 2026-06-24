@@ -374,11 +374,20 @@ class AITools:
         if isinstance(exc, TimeoutError):
             return True
 
+        text = str(exc).lower()
+        quota_markers = (
+            "quota exceeded",
+            "resource_exhausted",
+            "free_tier",
+            "check your plan and billing",
+        )
+        if any(marker in text for marker in quota_markers):
+            return False
+
         status_code = cls._get_exception_status_code(exc)
         if status_code in {429, 500, 502, 503, 504}:
             return True
 
-        text = str(exc).lower()
         transient_markers = (
             "unavailable",
             "high demand",
@@ -394,7 +403,7 @@ class AITools:
 
     @classmethod
     def _vision_retry_attempts(cls) -> int:
-        return cls._read_positive_int_env("AI_VISION_RETRY_ATTEMPTS", 3, 1)
+        return cls._read_positive_int_env("AI_VISION_RETRY_ATTEMPTS", 2, 1)
 
     @staticmethod
     def _vision_retry_delay(attempt: int) -> float:
