@@ -1534,6 +1534,19 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         )
                         if action_delay > 0:
                             await asyncio.sleep(action_delay)
+                        if not isinstance(
+                            action,
+                            (SendTextAction, SendDiceAction, KeywordNotifyAction),
+                        ) and self._current_context_has_terminal_success(chat):
+                            stop_reason = (self.context.stop_reason or "").strip()
+                            self.log(
+                                "检测到任务已完成，跳过当前动作"
+                                + (f": {stop_reason}" if stop_reason else "")
+                            )
+                            self.context.stop_after_current_action = False
+                            self.context.stop_reason = None
+                            self.context.last_callback_answer = None
+                            return
                         next_action = (
                             chat.actions[index] if index < total_actions else None
                         )
@@ -2333,6 +2346,19 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             if item
         )
         return self._text_has_terminal_success_text(text)
+
+    def _current_context_has_terminal_success(self, chat: SignChatV3) -> bool:
+        messages_dict = self.context.chat_messages.get(chat.chat_id) or {}
+        for message in reversed(list(messages_dict.values())):
+            if message is None:
+                continue
+            if not self._message_matches_chat_thread(message, chat):
+                continue
+            if self._message_has_terminal_success_text(message):
+                self.context.stop_reason = self._summarize_target_message(message)
+                self._log_received_target_message(message, prefix="收到回复")
+                return True
+        return False
 
     async def _wait_for_terminal_success(
         self,
