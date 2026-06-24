@@ -8,6 +8,7 @@ import pathlib
 import re
 from typing import TYPE_CHECKING, Any, Union
 
+import httpx
 import json_repair
 from typing_extensions import Optional, Required, TypedDict
 
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 from tg_signer.utils import UserInput, print_to_user
 
 DEFAULT_MODEL = "gpt-4o"
+DEFAULT_PADDLEOCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+DEFAULT_PADDLEOCR_MODEL = "PaddleOCR-VL-1.5"
 
 DEFAULT_CHOOSE_OPTION_BY_IMAGE_PROMPT = (
     "You are a low-latency visual matcher for Telegram sign-in challenges. "
@@ -85,7 +88,16 @@ class OpenAIConfigManager:
         return self.workdir / ".openai_config.json"
 
     def has_env_config(self):
-        return bool(os.environ.get("OPENAI_API_KEY"))
+        return bool(
+            os.environ.get("OPENAI_API_KEY")
+            or (
+                os.environ.get("PADDLEOCR_API_TOKEN")
+                and (
+                    os.environ.get("PADDLEOCR_API_URL")
+                    or DEFAULT_PADDLEOCR_API_URL
+                )
+            )
+        )
 
     def has_config(self) -> bool:
         return bool(self.load_config())
@@ -109,6 +121,8 @@ class OpenAIConfigManager:
     def load_config(self) -> Optional[OpenAIConfig]:
         # 环境变量优先
         if self.has_env_config():
+            if not os.environ.get("OPENAI_API_KEY"):
+                return OpenAIConfig()
             return OpenAIConfig(
                 api_key=os.environ["OPENAI_API_KEY"],
                 base_url=os.environ.get("OPENAI_BASE_URL"),
@@ -176,14 +190,44 @@ class AITools:
     )
 
     def __init__(self, cfg: OpenAIConfig):
-        self.client = get_openai_client(
-            api_key=cfg["api_key"], base_url=cfg.get("base_url")
-        )
+        self.client = None
+        if cfg.get("api_key"):
+            self.client = get_openai_client(
+                api_key=cfg["api_key"], base_url=cfg.get("base_url")
+            )
         self.default_model = cfg.get("model") or DEFAULT_MODEL
 
     @staticmethod
     def _normalize_option_text(text: Any) -> str:
         return "".join(str(text).split()).lower()
+
+    @staticmethod
+    def _has_paddleocr_config() -> bool:
+        return bool(os.environ.get("PADDLEOCR_API_TOKEN"))
+
+    @staticmethod
+    def _paddleocr_api_url() -> str:
+        return os.environ.get("PADDLEOCR_API_URL") or DEFAULT_PADDLEOCR_API_URL
+
+    @staticmethod
+    def _paddleocr_model() -> str:
+        return os.environ.get("PADDLEOCR_MODEL") or DEFAULT_PADDLEOCR_MODEL
+
+    @staticmethod
+    def _paddleocr_timeout() -> float:
+        try:
+            timeout = float(os.environ.get("PADDLEOCR_TIMEOUT", "18"))
+        except ValueError:
+            return 18.0
+        return max(3.0, timeout)
+
+    @staticmethod
+    def _paddleocr_poll_interval() -> float:
+        try:
+            interval = float(os.environ.get("PADDLEOCR_POLL_INTERVAL", "0.8"))
+        except ValueError:
+            return 0.8
+        return max(0.2, interval)
 
     @staticmethod
     def _ai_timeout() -> float:
@@ -336,6 +380,78 @@ class AITools:
 
         return [cls._coerce_option_index(result, options)]
 
+    @classmethod
+    def _collect_paddleocr_texts(cls, node: Any) -> list[str]:
+        texts: list[str] = []
+        if isinstance(node, list):
+            for item in node:
+                texts.extend(cls._collect_paddleocr_texts(item))
+            return texts
+
+        if not isinstance(node, dict):
+            return texts
+
+        markdown = node.get("markdown")
+        if isinstance(markdown, dict) and isinstance(markdown.get("text"), str):
+            text = markdown["text"].strip()
+            if text:
+                texts.append(text)
+
+        pruned_result = node.get("prunedResult")
+        if isinstance(pruned_result, dict):
+            texts.extend(cls._collect_paddleocr_texts(pruned_result))
+
+        rec_texts = node.get("rec_texts")
+        if isinstance(rec_texts, list):
+            text = " ".join(str(item).strip() for item in rec_texts if str(item).strip())
+            if text:
+                texts.append(text)
+
+        for key in ("text", "content", "value", "recognized_text", "ocr_text"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+
+        for key in (
+            "result",
+            "data",
+            "layoutParsingResults",
+            "ocrResults",
+            "extractResult",
+        ):
+            value = node.get(key)
+            if isinstance(value, (dict, list)):
+                texts.extend(cls._collect_paddleocr_texts(value))
+
+        return texts
+
+    @classmethod
+    def _extract_paddleocr_text(cls, response: Any) -> str:
+        seen = set()
+        unique_texts = []
+        for text in cls._collect_paddleocr_texts(response):
+            normalized = text.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique_texts.append(normalized)
+        return "\n".join(unique_texts).strip()
+
+    @classmethod
+    def _coerce_paddleocr_option_indexes(
+        cls, response: Any, options: list[tuple[int, str]]
+    ) -> list[int]:
+        text = cls._extract_paddleocr_text(response)
+        if not text:
+            raise ValueError("PaddleOCR returned no text for option matching")
+
+        parsed: Any = text
+        if any(marker in text for marker in ("{", "[", '"options"', '"option"')):
+            try:
+                parsed = json_repair.loads(text)
+            except Exception:
+                parsed = text
+        return cls._coerce_option_indexes(parsed, options)
+
     @staticmethod
     def _should_retry_without_json_mode(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -474,6 +590,92 @@ class AITools:
             kwargs.pop("response_format", None)
             return await self._call_visual_completion_with_retries(client, kwargs)
 
+    @classmethod
+    async def _fetch_paddleocr_jsonl(
+        cls, client: httpx.AsyncClient, jsonl_url: str
+    ) -> list[dict[str, Any]]:
+        response = await client.get(jsonl_url)
+        response.raise_for_status()
+        results = []
+        for line in response.text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            results.append(json.loads(line))
+        return results
+
+    async def _request_paddleocr(self, image: bytes) -> dict[str, Any]:
+        token = os.environ.get("PADDLEOCR_API_TOKEN")
+        if not token:
+            raise RuntimeError("PADDLEOCR_API_TOKEN is not configured")
+
+        image = self._prepare_vision_image(image)
+        timeout_seconds = self._paddleocr_timeout()
+        timeout = httpx.Timeout(timeout_seconds, connect=5.0)
+        headers = {"Authorization": f"Bearer {token}"}
+        optional_payload = {
+            "useDocOrientationClassify": False,
+            "useDocUnwarping": False,
+            "useChartRecognition": False,
+        }
+        data = {
+            "model": self._paddleocr_model(),
+            "optionalPayload": json.dumps(optional_payload),
+        }
+        files = {"file": ("image.jpg", image, "image/jpeg")}
+        api_url = self._paddleocr_api_url().rstrip("/")
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                api_url, headers=headers, data=data, files=files
+            )
+            response.raise_for_status()
+            payload = response.json()
+            job_id = (payload.get("data") or {}).get("jobId")
+            if not job_id:
+                return payload
+
+            while True:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError("PaddleOCR job timed out")
+
+                job_response = await client.get(f"{api_url}/{job_id}", headers=headers)
+                job_response.raise_for_status()
+                job_payload = job_response.json()
+                job_data = job_payload.get("data") or {}
+                state = job_data.get("state")
+                if state == "done":
+                    result_url = (job_data.get("resultUrl") or {}).get("jsonUrl")
+                    if result_url:
+                        job_data["result"] = await self._fetch_paddleocr_jsonl(
+                            client, result_url
+                        )
+                    return job_payload
+                if state == "failed":
+                    raise RuntimeError(
+                        f"PaddleOCR job failed: {job_data.get('errorMsg') or job_payload}"
+                    )
+                if state not in {"pending", "running", None}:
+                    raise RuntimeError(f"Unexpected PaddleOCR job state: {state}")
+
+                delay = min(
+                    self._paddleocr_poll_interval(),
+                    max(0.0, deadline - asyncio.get_running_loop().time()),
+                )
+                if delay:
+                    await asyncio.sleep(delay)
+
+    async def choose_options_by_paddleocr(
+        self, image: bytes, options: list[tuple[int, str]]
+    ) -> list[int]:
+        response = await self._request_paddleocr(image)
+        return self._coerce_paddleocr_option_indexes(response, options)
+
+    async def extract_text_by_paddleocr(self, image: bytes) -> str:
+        response = await self._request_paddleocr(image)
+        return self._extract_paddleocr_text(response)
+
     async def choose_option_by_image(
         self,
         image: bytes,
@@ -484,6 +686,9 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> int:
+        if self._has_paddleocr_config():
+            return (await self.choose_options_by_paddleocr(image, options))[0]
+
         sys_prompt = (system_prompt or "").strip() or DEFAULT_CHOOSE_OPTION_BY_IMAGE_PROMPT
         client = client or self.client
         model = model or self.default_model
@@ -530,6 +735,9 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> list[int]:
+        if self._has_paddleocr_config():
+            return await self.choose_options_by_paddleocr(image, options)
+
         if (system_prompt or "").strip():
             sys_prompt = system_prompt.strip()
         elif self._looks_like_single_object_choice(query, options):
@@ -579,8 +787,13 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> str:
+        if self._has_paddleocr_config():
+            return await self.extract_text_by_paddleocr(image)
+
         sys_prompt = (system_prompt or "").strip() or DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT
         client = client or self.client
+        if client is None:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
         model = model or self.default_model
         text_query = query or "Extract the key text from this image."
         messages = [

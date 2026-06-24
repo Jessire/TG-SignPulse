@@ -1,11 +1,13 @@
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from tg_signer.ai_tools import AITools
+from tg_signer.ai_tools import AITools, OpenAIConfigManager
 from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
 
@@ -64,6 +66,89 @@ class AIToolsOptionParsingTest(unittest.TestCase):
         )
 
         self.assertFalse(AITools._should_retry_transient_ai_error(error))
+
+    def test_extracts_text_from_paddleocr_markdown_result(self):
+        response = {
+            "result": {
+                "layoutParsingResults": [
+                    {"markdown": {"text": " bxtG\n"}},
+                ]
+            }
+        }
+
+        self.assertEqual(AITools._extract_paddleocr_text(response), "bxtG")
+
+    def test_extracts_text_from_paddleocr_pruned_result(self):
+        response = {
+            "result": {
+                "layoutParsingResults": [
+                    {"prunedResult": {"rec_texts": ["b", "x", "t", "G"]}},
+                ]
+            }
+        }
+
+        self.assertEqual(AITools._extract_paddleocr_text(response), "b x t G")
+
+    def test_extracts_text_from_paddleocr_jsonl_job_result(self):
+        response = {
+            "data": {
+                "state": "done",
+                "result": [
+                    {
+                        "result": {
+                            "layoutParsingResults": [
+                                {"markdown": {"text": "mask"}},
+                            ]
+                        }
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(AITools._extract_paddleocr_text(response), "mask")
+
+    def test_coerces_paddleocr_text_to_option(self):
+        response = {
+            "result": {
+                "layoutParsingResults": [
+                    {"markdown": {"text": "mask"}},
+                ]
+            }
+        }
+
+        self.assertEqual(
+            AITools._coerce_paddleocr_option_indexes(response, self.options),
+            [4],
+        )
+
+    def test_coerces_paddleocr_json_to_option(self):
+        response = {
+            "result": {
+                "layoutParsingResults": [
+                    {"markdown": {"text": '{"options":[2]}'}},
+                ]
+            }
+        }
+
+        self.assertEqual(
+            AITools._coerce_paddleocr_option_indexes(response, self.options),
+            [2],
+        )
+
+
+class OpenAIConfigManagerTest(unittest.TestCase):
+    def test_paddleocr_env_counts_as_ai_config(self):
+        with TemporaryDirectory() as workdir, patch.dict(
+            "os.environ",
+            {
+                "PADDLEOCR_API_URL": "https://example.test/api/v2/ocr/jobs",
+                "PADDLEOCR_API_TOKEN": "token",
+            },
+            clear=True,
+        ):
+            cfg = OpenAIConfigManager(workdir).load_config()
+
+        self.assertEqual(cfg, {})
 
 
 if __name__ == "__main__":
@@ -201,3 +286,36 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "bxtG")
         self.assertEqual(len(fake_completions.calls), 2)
+
+    async def test_choose_options_by_image_uses_paddleocr_when_configured(self):
+        fake_completions = _FakeCompletions([])
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+
+        async def fake_request(_image):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {"markdown": {"text": "banana"}},
+                    ]
+                }
+            }
+
+        tools._request_paddleocr = fake_request
+        with patch.dict(
+            "os.environ",
+            {
+                "PADDLEOCR_API_URL": "https://example.test/api/v2/ocr/jobs",
+                "PADDLEOCR_API_TOKEN": "token",
+            },
+        ):
+            result = await tools.choose_options_by_image(
+                b"fake-image",
+                "Choose the correct option",
+                [(1, "apple"), (2, "banana")],
+            )
+
+        self.assertEqual(result, [2])
+        self.assertEqual(fake_completions.calls, [])
