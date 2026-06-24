@@ -2361,6 +2361,11 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             task_timezone
         ).date()
 
+    def _message_is_today_terminal_success(self, message: Message) -> bool:
+        return self._message_is_from_today(
+            message
+        ) and self._message_has_terminal_success_text(message)
+
     async def _chat_has_today_terminal_success(
         self,
         chat: SignChatV3,
@@ -2373,9 +2378,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 continue
             if not self._message_matches_chat_thread(message, chat):
                 continue
-            if self._message_is_from_today(
-                message
-            ) and self._message_has_terminal_success_text(message):
+            if self._message_is_today_terminal_success(message):
                 self.context.stop_reason = self._summarize_target_message(message)
                 self._log_received_target_message(message, prefix="收到回复")
                 return True
@@ -2386,9 +2389,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             ):
                 if not self._message_matches_chat_thread(message, chat):
                     continue
-                if self._message_is_from_today(
-                    message
-                ) and self._message_has_terminal_success_text(message):
+                if self._message_is_today_terminal_success(message):
                     self.context.stop_reason = self._summarize_target_message(message)
                     self._log_received_target_message(message, prefix="收到回复")
                     return True
@@ -2797,6 +2798,10 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             continue
                         self._log_received_target_message(message)
                         self.context.waiting_message = message
+                        if self._message_is_today_terminal_success(message):
+                            self.context.stop_after_current_action = True
+                            self.context.stop_reason = self._summarize_target_message(message)
+                            return True
 
                         before_click_state: dict[int, tuple] = {}
 
@@ -2879,6 +2884,10 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 if not self._message_matches_chat_thread(message, chat):
                                     continue
                                 self._log_received_target_message(message)
+                                if self._message_is_today_terminal_success(message):
+                                    self.context.stop_after_current_action = True
+                                    self.context.stop_reason = self._summarize_target_message(message)
+                                    return True
 
                                 before_click_state: dict[int, tuple] = {}
 
@@ -2970,7 +2979,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     self._log_received_target_message(message)
                     if not is_new_or_changed_message(message):
                         continue
-                    if self._message_has_terminal_success_text(message):
+                    if self._message_is_today_terminal_success(message):
                         self.context.stop_after_current_action = True
                         self.context.stop_reason = self._summarize_target_message(message)
                         return None
@@ -3014,7 +3023,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         self._log_received_target_message(message)
                         if not is_new_or_changed_message(message):
                             continue
-                        if self._message_has_terminal_success_text(message):
+                        if self._message_is_today_terminal_success(message):
                             self.context.stop_after_current_action = True
                             self.context.stop_reason = self._summarize_target_message(message)
                             return None

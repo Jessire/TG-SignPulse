@@ -1,11 +1,12 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
 
 from PIL import Image
 
 from tg_signer.ai_tools import AITools
-from tg_signer.core import _is_callback_confirmation_unavailable
+from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
 
 class AIToolsOptionParsingTest(unittest.TestCase):
@@ -72,6 +73,29 @@ class CallbackFallbackTest(unittest.TestCase):
                 RuntimeError("Telegram says: [400 MESSAGE_NOT_MODIFIED]")
             )
         )
+
+
+class TerminalSuccessDetectionTest(unittest.TestCase):
+    def setUp(self):
+        self.signer = object.__new__(UserSigner)
+
+    def test_detects_today_terminal_success_message(self):
+        message = SimpleNamespace(
+            text="🎉 签到成功，获得了 9积分",
+            caption=None,
+            date=datetime.now(timezone.utc),
+        )
+
+        self.assertTrue(self.signer._message_is_today_terminal_success(message))
+
+    def test_ignores_old_terminal_success_message(self):
+        message = SimpleNamespace(
+            text="🎉 签到成功，获得了 9积分",
+            caption=None,
+            date=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+
+        self.assertFalse(self.signer._message_is_today_terminal_success(message))
 
 
 class _FakeCompletions:
