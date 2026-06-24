@@ -2173,6 +2173,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             if self._message_matches_chat_thread(message, chat) and (
                 self._message_supports_next_action(action, message)
             ):
+                self._remember_next_action_candidate(chat, message)
                 return True
 
         try:
@@ -2183,6 +2184,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 if self._message_matches_chat_thread(message, chat) and (
                     self._message_supports_next_action(action, message)
                 ):
+                    self._remember_next_action_candidate(chat, message)
                     return True
         except Exception as e:
             self.log(f"下一步动作候选消息检查失败: {e}", level="WARNING")
