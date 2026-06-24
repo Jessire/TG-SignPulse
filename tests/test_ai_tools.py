@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from PIL import Image
 
 from tg_signer.ai_tools import AITools, OpenAIConfigManager
+from tg_signer.config import ReplyByImageRecognitionAction
 from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
 
@@ -195,6 +196,34 @@ class TerminalSuccessDetectionTest(unittest.TestCase):
         )
 
         self.assertFalse(self.signer._message_is_today_terminal_success(message))
+
+    def test_skips_verification_error_image(self):
+        message = SimpleNamespace(text=None, caption="验证码错误!")
+
+        self.assertTrue(self.signer._message_is_verification_error_image(message))
+
+    def test_normalizes_verification_code_result(self):
+        action = ReplyByImageRecognitionAction(
+            ai_prompt="Read only the verification code from the image."
+        )
+        message = SimpleNamespace(text=None, caption="请输入验证码(不区分大小写):")
+
+        self.assertEqual(
+            self.signer._normalize_image_recognition_text(action, message, " b x t G "),
+            "bxtG",
+        )
+
+    def test_rejects_brand_text_as_verification_code(self):
+        action = ReplyByImageRecognitionAction(
+            ai_prompt="Read only the verification code from the image."
+        )
+        message = SimpleNamespace(text=None, caption="请输入验证码(不区分大小写):")
+
+        self.assertIsNone(
+            self.signer._normalize_image_recognition_text(
+                action, message, "EMBY PUBLIC\n\n# Peach"
+            )
+        )
 
 
 class _FakeCompletions:

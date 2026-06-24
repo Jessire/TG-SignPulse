@@ -4,6 +4,7 @@ import logging
 import os
 import pathlib
 import random
+import re
 import sqlite3
 import time
 import unicodedata
@@ -2348,6 +2349,57 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         )
         return self._text_has_terminal_success_text(text)
 
+    @staticmethod
+    def _message_text_or_caption(message: Message) -> str:
+        return str(
+            getattr(message, "caption", None) or getattr(message, "text", None) or ""
+        )
+
+    @classmethod
+    def _image_recognition_expects_verification_code(
+        cls, action: ReplyByImageRecognitionAction, message: Message
+    ) -> bool:
+        text = " ".join(
+            (
+                str(getattr(action, "ai_prompt", "") or ""),
+                cls._message_text_or_caption(message),
+            )
+        ).lower()
+        markers = (
+            "验证码",
+            "verification code",
+            "captcha",
+            "code characters",
+            "only the code",
+        )
+        return any(marker in text for marker in markers)
+
+    @classmethod
+    def _message_is_verification_error_image(cls, message: Message) -> bool:
+        text = cls._message_text_or_caption(message).lower()
+        if not text:
+            return False
+        prompt_markers = ("请输入验证码", "输入验证码", "verification code", "captcha")
+        if any(marker in text for marker in prompt_markers):
+            return False
+        failure_markers = ("验证码错误", "错误", "失败", "过期", "error", "wrong")
+        return "验证码" in text and any(marker in text for marker in failure_markers)
+
+    @classmethod
+    def _normalize_image_recognition_text(
+        cls, action: ReplyByImageRecognitionAction, message: Message, text: str
+    ) -> Optional[str]:
+        text = (text or "").strip()
+        if not text:
+            return None
+        if not cls._image_recognition_expects_verification_code(action, message):
+            return text
+
+        compact = re.sub(r"\s+", "", text)
+        if re.fullmatch(r"[A-Za-z0-9]{3,12}", compact):
+            return compact
+        return None
+
     def _message_is_from_today(self, message: Message) -> bool:
         message_date = getattr(message, "date", None) or getattr(
             message, "edit_date", None
@@ -2634,6 +2686,9 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         if self._collect_clickable_buttons(message):
             self.log("跳过带按钮的图片消息，等待真正的验证码/题目图片")
             return False
+        if self._message_is_verification_error_image(message):
+            self.log("跳过验证码错误提示图片，等待新的验证码图片")
+            return False
         self._log_received_target_message(message)
         self.log("AI 正在分析图片中的文字")
         image_buffer: BinaryIO = await self.app.download_media(
@@ -2647,12 +2702,14 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             image_bytes,
             system_prompt=action.ai_prompt,
         )
-        text = (text or "").strip()
+        text = self._normalize_image_recognition_text(action, message, text)
         if not text:
             self.log("AI 未识别到可发送文本", level="WARNING")
             return False
         self.log(f"AI 识别结果：{text}")
         await self.send_message(message.chat.id, text)
+        if self._image_recognition_expects_verification_code(action, message):
+            return False
         return True
 
     async def _click_button_by_calculation_problem(
