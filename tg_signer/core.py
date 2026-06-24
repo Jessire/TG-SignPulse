@@ -2787,12 +2787,66 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             self.log("AI 未识别到可发送文本", level="WARNING")
             return False
         self.log(f"AI 识别结果：{text}")
-        if self._image_recognition_expects_verification_code(action, message):
+        expects_verification_code = self._image_recognition_expects_verification_code(
+            action, message
+        )
+        verification_chat = None
+        before_send_state = None
+        if expects_verification_code:
             self._save_ocr_debug_image(message, image_bytes, f"sent-{text}")
+            verification_chat = SimpleNamespace(
+                chat_id=message.chat.id,
+                message_thread_id=self._resolve_message_thread_id(message),
+            )
+            before_send_state = await self._chat_state_snapshot(
+                verification_chat,
+                history_limit=_read_positive_int_env("SIGN_TASK_HISTORY_LOOKBACK", 12, 3),
+            )
         await self.send_message(message.chat.id, text)
-        if self._image_recognition_expects_verification_code(action, message):
-            return False
+        if expects_verification_code:
+            return await self._wait_for_verification_result(
+                verification_chat,
+                before_send_state or {},
+                timeout=_read_positive_float_env(
+                    "SIGN_TASK_VERIFICATION_RESULT_TIMEOUT", 10.0, 2.0
+                ),
+            )
         return True
+
+    async def _wait_for_verification_result(
+        self,
+        chat,
+        before_state: dict[int, tuple],
+        *,
+        timeout: float,
+    ) -> bool:
+        deadline = time.perf_counter() + timeout
+        history_limit = _read_positive_int_env("SIGN_TASK_HISTORY_LOOKBACK", 12, 3)
+        while time.perf_counter() < deadline:
+            await asyncio.sleep(0.4)
+            try:
+                async for reply in self.app.get_chat_history(
+                    chat.chat_id,
+                    limit=history_limit,
+                ):
+                    if not self._message_matches_chat_thread(reply, chat):
+                        continue
+                    message_id = getattr(reply, "id", None)
+                    if before_state.get(message_id) == self._message_state_marker(reply):
+                        continue
+                    self._log_received_target_message(reply)
+                    if self._message_is_today_terminal_success(reply):
+                        self.context.stop_after_current_action = True
+                        self.context.stop_reason = self._summarize_target_message(reply)
+                        return True
+                    if self._message_is_verification_error_image(reply):
+                        self.log("验证码提交后收到错误提示", level="WARNING")
+                        return False
+            except Exception as exc:
+                self.log(f"验证码结果检查失败: {exc}", level="WARNING")
+                return False
+        self.log("验证码提交后未等到明确结果", level="WARNING")
+        return False
 
     async def _click_button_by_calculation_problem(
         self, action: ClickButtonByCalculationProblemAction, message
