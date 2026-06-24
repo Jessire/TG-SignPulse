@@ -300,7 +300,7 @@ DICE_EMOJIS = ("🎲", "🎯", "🏀", "⚽", "🎳", "🎰")
 
 Session.START_TIMEOUT = 5  # 原始超时时间为2秒，但一些代理访问会超时，所以这里调大一点
 
-OPENAI_USE_PROMPT = "当前任务需要配置大模型，请确保运行前正确设置`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`等环境变量，或通过`tg-signer llm-config`持久化配置。"
+OPENAI_USE_PROMPT = "当前任务需要图像识别，请确保运行前正确设置`PADDLEOCR_API_TOKEN`和`PADDLEOCR_API_URL`环境变量。"
 
 
 def _is_callback_data_invalid(exc: BaseException) -> bool:
@@ -2435,6 +2435,22 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             return (preferred or candidates)[-1]
         return None
 
+    def _save_failed_ocr_image(self, message: Message, image_bytes: bytes) -> None:
+        enabled = os.environ.get("SIGN_TASK_SAVE_FAILED_OCR_IMAGES", "").lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return
+        try:
+            chat_id = getattr(getattr(message, "chat", None), "id", "unknown")
+            message_id = getattr(message, "id", "unknown")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            debug_dir = pathlib.Path(self.workdir) / "debug" / "ocr"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = debug_dir / f"{timestamp}_chat-{chat_id}_msg-{message_id}.jpg"
+            debug_path.write_bytes(image_bytes)
+            self.log(f"已保存失败 OCR 图片用于诊断: {debug_path}")
+        except Exception as exc:
+            self.log(f"保存失败 OCR 图片失败: {exc}", level="WARNING")
+
     def _message_is_from_today(self, message: Message) -> bool:
         message_date = getattr(message, "date", None) or getattr(
             message, "edit_date", None
@@ -2733,12 +2749,17 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         image_bytes = image_buffer.read()
         if (action.ai_prompt or "").strip():
             self.log("当前 AI 动作使用自定义提示词")
-        text = await self.get_ai_tools().extract_text_by_image(
-            image_bytes,
-            system_prompt=action.ai_prompt,
-        )
+        try:
+            text = await self.get_ai_tools().extract_text_by_image(
+                image_bytes,
+                system_prompt=action.ai_prompt,
+            )
+        except Exception:
+            self._save_failed_ocr_image(message, image_bytes)
+            raise
         text = self._normalize_image_recognition_text(action, message, text)
         if not text:
+            self._save_failed_ocr_image(message, image_bytes)
             self.log("AI 未识别到可发送文本", level="WARNING")
             return False
         self.log(f"AI 识别结果：{text}")

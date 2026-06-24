@@ -253,84 +253,37 @@ class _FakeCompletions:
 
 
 class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
-    async def test_choose_options_by_image_retries_without_json_mode(self):
-        fake_completions = _FakeCompletions(
-            [
-                RuntimeError("Error code: 403 - {'message': 'openai_error', 'code': 'bad_response_status_code', 'detail': 'response_format json_object unsupported'}"),
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content='{"options":[2]}')
-                        )
-                    ]
-                ),
-            ]
-        )
+    async def test_choose_options_by_image_requires_paddleocr(self):
+        fake_completions = _FakeCompletions([])
         fake_client = SimpleNamespace(
             chat=SimpleNamespace(completions=fake_completions)
         )
         tools = AITools({"api_key": "test", "model": "gpt-4o"})
         tools.client = fake_client
 
-        result = await tools.choose_options_by_image(
-            b"fake-image",
-            "Choose the correct option",
-            [(1, "apple"), (2, "banana")],
-        )
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "PADDLEOCR_API_TOKEN"):
+                await tools.choose_options_by_image(
+                    b"fake-image",
+                    "Choose the correct option",
+                    [(1, "apple"), (2, "banana")],
+                )
 
-        self.assertEqual(result, [2])
-        self.assertIn("response_format", fake_completions.calls[0])
-        self.assertNotIn("response_format", fake_completions.calls[1])
+        self.assertEqual(fake_completions.calls, [])
 
-    async def test_choose_options_by_image_retries_transient_provider_errors(self):
-        fake_completions = _FakeCompletions(
-            [
-                RuntimeError("Error code: 503 - {'error': {'status': 'UNAVAILABLE'}}"),
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content='{"options":[2]}')
-                        )
-                    ]
-                ),
-            ]
-        )
+    async def test_extract_text_by_image_requires_paddleocr(self):
+        fake_completions = _FakeCompletions([])
         fake_client = SimpleNamespace(
             chat=SimpleNamespace(completions=fake_completions)
         )
         tools = AITools({"api_key": "test", "model": "gpt-4o"})
         tools.client = fake_client
 
-        result = await tools.choose_options_by_image(
-            b"fake-image",
-            "Choose the correct option",
-            [(1, "apple"), (2, "banana")],
-        )
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "PADDLEOCR_API_TOKEN"):
+                await tools.extract_text_by_image(b"fake-image")
 
-        self.assertEqual(result, [2])
-        self.assertEqual(len(fake_completions.calls), 2)
-
-    async def test_extract_text_by_image_retries_transient_provider_errors(self):
-        fake_completions = _FakeCompletions(
-            [
-                RuntimeError("Error code: 503 - {'error': {'status': 'UNAVAILABLE'}}"),
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(message=SimpleNamespace(content="bxtG"))
-                    ]
-                ),
-            ]
-        )
-        fake_client = SimpleNamespace(
-            chat=SimpleNamespace(completions=fake_completions)
-        )
-        tools = AITools({"api_key": "test", "model": "gpt-4o"})
-        tools.client = fake_client
-
-        result = await tools.extract_text_by_image(b"fake-image")
-
-        self.assertEqual(result, "bxtG")
-        self.assertEqual(len(fake_completions.calls), 2)
+        self.assertEqual(fake_completions.calls, [])
 
     async def test_choose_options_by_image_uses_paddleocr_when_configured(self):
         fake_completions = _FakeCompletions([])
