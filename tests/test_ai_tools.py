@@ -54,6 +54,9 @@ class AIToolsOptionParsingTest(unittest.TestCase):
             self.assertLess(prepared_image.width, 1600)
             self.assertLess(prepared_image.height, 1200)
 
+    def test_timeout_is_treated_as_transient_ai_error(self):
+        self.assertTrue(AITools._should_retry_transient_ai_error(TimeoutError()))
+
 
 if __name__ == "__main__":
     unittest.main()

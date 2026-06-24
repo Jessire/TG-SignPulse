@@ -188,9 +188,9 @@ class AITools:
     @staticmethod
     def _ai_timeout() -> float:
         try:
-            timeout = float(os.environ.get("AI_VISION_TIMEOUT", "20"))
+            timeout = float(os.environ.get("AI_VISION_TIMEOUT", "8"))
         except ValueError:
-            return 20.0
+            return 8.0
         return max(3.0, timeout)
 
     @staticmethod
@@ -371,6 +371,9 @@ class AITools:
 
     @classmethod
     def _should_retry_transient_ai_error(cls, exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+
         status_code = cls._get_exception_status_code(exc)
         if status_code in {429, 500, 502, 503, 504}:
             return True
