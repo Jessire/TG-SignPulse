@@ -13,9 +13,12 @@ import json_repair
 from typing_extensions import Optional, Required, TypedDict
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 except Exception:  # pragma: no cover - Pillow is optional at runtime
     Image = None
+    ImageEnhance = None
+    ImageFilter = None
+    ImageOps = None
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI  # 在性能弱的机器上导入openai包实在有些慢
@@ -353,6 +356,24 @@ class AITools:
             return image
 
         prepared = cls._crop_light_border(prepared)
+        if os.environ.get("PADDLEOCR_TEXT_DENOISE", "true").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            filter_size = cls._read_positive_int_env("PADDLEOCR_TEXT_FILTER_SIZE", 7, 3)
+            if filter_size % 2 == 0:
+                filter_size += 1
+            filter_size = min(filter_size, 9)
+            prepared = ImageOps.autocontrast(prepared.convert("L"))
+            prepared = prepared.filter(ImageFilter.MedianFilter(filter_size))
+            prepared = ImageOps.autocontrast(prepared)
+            try:
+                contrast = float(os.environ.get("PADDLEOCR_TEXT_CONTRAST", "2.5"))
+            except ValueError:
+                contrast = 2.5
+            prepared = ImageEnhance.Contrast(prepared).enhance(max(1.0, contrast))
         resampling = getattr(Image, "Resampling", Image).LANCZOS
         scale = min(
             cls._read_positive_int_env("PADDLEOCR_TEXT_IMAGE_SCALE", 3, 1),

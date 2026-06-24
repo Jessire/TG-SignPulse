@@ -57,6 +57,24 @@ class AIToolsOptionParsingTest(unittest.TestCase):
             self.assertLess(prepared_image.width, 1600)
             self.assertLess(prepared_image.height, 1200)
 
+    def test_prepare_ocr_image_denoises_and_upscales_small_input(self):
+        image = Image.new("RGB", (160, 50), (60, 120, 230))
+        for x in range(40, 120):
+            for y in range(15, 35):
+                if (x + y) % 5 == 0:
+                    image.putpixel((x, y), (20, 20, 30))
+
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG")
+
+        with patch.dict("os.environ", {"PADDLEOCR_TEXT_IMAGE_SCALE": "3"}):
+            prepared = AITools._prepare_ocr_image(buffer.getvalue())
+
+        with Image.open(BytesIO(prepared)) as prepared_image:
+            self.assertEqual(prepared_image.format, "PNG")
+            self.assertGreaterEqual(prepared_image.width, 480)
+            self.assertGreaterEqual(prepared_image.height, 150)
+
     def test_timeout_is_treated_as_transient_ai_error(self):
         self.assertTrue(AITools._should_retry_transient_ai_error(TimeoutError()))
 
