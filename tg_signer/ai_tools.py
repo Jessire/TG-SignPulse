@@ -210,7 +210,19 @@ class AITools:
         return os.environ.get("PADDLEOCR_API_URL") or DEFAULT_PADDLEOCR_API_URL
 
     @staticmethod
-    def _paddleocr_model() -> str:
+    def _paddleocr_model(kind: str = "default") -> str:
+        if kind == "text":
+            return (
+                os.environ.get("PADDLEOCR_TEXT_MODEL")
+                or os.environ.get("PADDLEOCR_MODEL")
+                or "PP-OCRv5"
+            )
+        if kind == "choice":
+            return (
+                os.environ.get("PADDLEOCR_CHOICE_MODEL")
+                or os.environ.get("PADDLEOCR_MODEL")
+                or DEFAULT_PADDLEOCR_MODEL
+            )
         return os.environ.get("PADDLEOCR_MODEL") or DEFAULT_PADDLEOCR_MODEL
 
     @staticmethod
@@ -604,22 +616,35 @@ class AITools:
             results.append(json.loads(line))
         return results
 
-    async def _request_paddleocr(self, image: bytes) -> dict[str, Any]:
+    @classmethod
+    def _paddleocr_optional_payload(cls, model: str) -> dict[str, Any]:
+        optional_payload: dict[str, Any] = {
+            "useDocOrientationClassify": False,
+        }
+        if model.startswith("PaddleOCR-VL"):
+            optional_payload.update(
+                {
+                    "useDocUnwarping": False,
+                    "useChartRecognition": False,
+                }
+            )
+        return optional_payload
+
+    async def _request_paddleocr(
+        self, image: bytes, *, model: str | None = None
+    ) -> dict[str, Any]:
         token = os.environ.get("PADDLEOCR_API_TOKEN")
         if not token:
             raise RuntimeError("PADDLEOCR_API_TOKEN is not configured")
 
         image = self._prepare_vision_image(image)
+        model = model or self._paddleocr_model()
         timeout_seconds = self._paddleocr_timeout()
         timeout = httpx.Timeout(timeout_seconds, connect=5.0)
         headers = {"Authorization": f"Bearer {token}"}
-        optional_payload = {
-            "useDocOrientationClassify": False,
-            "useDocUnwarping": False,
-            "useChartRecognition": False,
-        }
+        optional_payload = self._paddleocr_optional_payload(model)
         data = {
-            "model": self._paddleocr_model(),
+            "model": model,
             "optionalPayload": json.dumps(optional_payload),
         }
         files = {"file": ("image.jpg", image, "image/jpeg")}
@@ -669,11 +694,15 @@ class AITools:
     async def choose_options_by_paddleocr(
         self, image: bytes, options: list[tuple[int, str]]
     ) -> list[int]:
-        response = await self._request_paddleocr(image)
+        response = await self._request_paddleocr(
+            image, model=self._paddleocr_model("choice")
+        )
         return self._coerce_paddleocr_option_indexes(response, options)
 
     async def extract_text_by_paddleocr(self, image: bytes) -> str:
-        response = await self._request_paddleocr(image)
+        response = await self._request_paddleocr(
+            image, model=self._paddleocr_model("text")
+        )
         return self._extract_paddleocr_text(response)
 
     async def choose_option_by_image(

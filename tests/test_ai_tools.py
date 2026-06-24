@@ -225,6 +225,19 @@ class TerminalSuccessDetectionTest(unittest.TestCase):
             )
         )
 
+    def test_extracts_code_candidate_from_ocr_context(self):
+        action = ReplyByImageRecognitionAction(
+            ai_prompt="Read only the verification code from the image."
+        )
+        message = SimpleNamespace(text=None, caption="请输入验证码(不区分大小写):")
+
+        self.assertEqual(
+            self.signer._normalize_image_recognition_text(
+                action, message, "EMBY PUBLIC\n# Peach\nbxtG"
+            ),
+            "bxtG",
+        )
+
 
 class _FakeCompletions:
     def __init__(self, responses):
@@ -326,7 +339,7 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
             chat=SimpleNamespace(completions=fake_completions)
         )
 
-        async def fake_request(_image):
+        async def fake_request(_image, **_kwargs):
             return {
                 "result": {
                     "layoutParsingResults": [

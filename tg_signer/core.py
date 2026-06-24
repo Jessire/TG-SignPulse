@@ -2398,6 +2398,32 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         compact = re.sub(r"\s+", "", text)
         if re.fullmatch(r"[A-Za-z0-9]{3,12}", compact):
             return compact
+        stopwords = {
+            "emby",
+            "public",
+            "peach",
+            "captcha",
+            "code",
+            "verification",
+        }
+        candidates = []
+        for candidate in re.findall(r"[A-Za-z0-9]{3,12}", text):
+            if candidate.lower() not in stopwords:
+                candidates.append(candidate)
+        if candidates:
+            preferred = [
+                candidate
+                for candidate in candidates
+                if 3 <= len(candidate) <= 8
+                and (
+                    any(char.isdigit() for char in candidate)
+                    or (
+                        any(char.islower() for char in candidate)
+                        and any(char.isupper() for char in candidate)
+                    )
+                )
+            ]
+            return (preferred or candidates)[-1]
         return None
 
     def _message_is_from_today(self, message: Message) -> bool:
