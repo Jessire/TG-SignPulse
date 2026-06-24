@@ -1552,6 +1552,22 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         next_action = (
                             chat.actions[index] if index < total_actions else None
                         )
+                        if (
+                            next_action is not None
+                            and isinstance(action, ClickKeyboardByTextAction)
+                            and await self._chat_has_action_candidate(
+                                chat,
+                                next_action,
+                                history_limit=_read_positive_int_env(
+                                    "SIGN_TASK_HISTORY_LOOKBACK", 12, 3
+                                ),
+                            )
+                        ):
+                            self.log(
+                                f"检测到下一步动作候选已出现，跳过当前步骤：{action_description}"
+                            )
+                            last_successful_index = index
+                            continue
                         result = await self.wait_for(
                             chat,
                             action,
