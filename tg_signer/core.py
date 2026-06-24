@@ -1486,6 +1486,20 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         total_actions = len(chat.actions)
         if total_actions == 0:
             raise RuntimeError("任务没有配置任何执行动作")
+        if await self._chat_has_today_terminal_success(
+            chat,
+            history_limit=_read_positive_int_env(
+                "SIGN_TASK_COMPLETION_LOOKBACK", 20, 3
+            ),
+        ):
+            stop_reason = (self.context.stop_reason or "").strip()
+            self.log(
+                "检测到今日任务已完成，跳过任务对象"
+                + (f": {stop_reason}" if stop_reason else "")
+            )
+            self.context.stop_reason = None
+            self.context.last_callback_answer = None
+            return
         max_flow_attempts = _read_positive_int_env("SIGN_TASK_FLOW_RETRY_ATTEMPTS", 1, 1)
         retry_backoff_steps = _read_positive_int_env("SIGN_TASK_RETRY_BACKOFF_STEPS", 2, 0)
         last_error: Optional[Exception] = None
@@ -1534,19 +1548,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         )
                         if action_delay > 0:
                             await asyncio.sleep(action_delay)
-                        if not isinstance(
-                            action,
-                            (SendTextAction, SendDiceAction, KeywordNotifyAction),
-                        ) and self._current_context_has_terminal_success(chat):
-                            stop_reason = (self.context.stop_reason or "").strip()
-                            self.log(
-                                "检测到任务已完成，跳过当前动作"
-                                + (f": {stop_reason}" if stop_reason else "")
-                            )
-                            self.context.stop_after_current_action = False
-                            self.context.stop_reason = None
-                            self.context.last_callback_answer = None
-                            return
                         next_action = (
                             chat.actions[index] if index < total_actions else None
                         )
@@ -2347,17 +2348,52 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         )
         return self._text_has_terminal_success_text(text)
 
-    def _current_context_has_terminal_success(self, chat: SignChatV3) -> bool:
+    def _message_is_from_today(self, message: Message) -> bool:
+        message_date = getattr(message, "date", None) or getattr(
+            message, "edit_date", None
+        )
+        if not isinstance(message_date, datetime):
+            return False
+        if message_date.tzinfo is None:
+            message_date = message_date.replace(tzinfo=timezone.utc)
+        task_timezone = timezone(timedelta(hours=8))
+        return message_date.astimezone(task_timezone).date() == datetime.now(
+            task_timezone
+        ).date()
+
+    async def _chat_has_today_terminal_success(
+        self,
+        chat: SignChatV3,
+        *,
+        history_limit: int,
+    ) -> bool:
         messages_dict = self.context.chat_messages.get(chat.chat_id) or {}
         for message in reversed(list(messages_dict.values())):
             if message is None:
                 continue
             if not self._message_matches_chat_thread(message, chat):
                 continue
-            if self._message_has_terminal_success_text(message):
+            if self._message_is_from_today(
+                message
+            ) and self._message_has_terminal_success_text(message):
                 self.context.stop_reason = self._summarize_target_message(message)
                 self._log_received_target_message(message, prefix="收到回复")
                 return True
+        try:
+            async for message in self.app.get_chat_history(
+                chat.chat_id,
+                limit=history_limit,
+            ):
+                if not self._message_matches_chat_thread(message, chat):
+                    continue
+                if self._message_is_from_today(
+                    message
+                ) and self._message_has_terminal_success_text(message):
+                    self.context.stop_reason = self._summarize_target_message(message)
+                    self._log_received_target_message(message, prefix="收到回复")
+                    return True
+        except Exception as e:
+            self.log(f"今日完成状态检查失败: {e}", level="WARNING")
         return False
 
     async def _wait_for_terminal_success(
