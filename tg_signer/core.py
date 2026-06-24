@@ -2453,7 +2453,9 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             return (preferred or candidates)[-1]
         return None
 
-    def _save_failed_ocr_image(self, message: Message, image_bytes: bytes) -> None:
+    def _save_ocr_debug_image(
+        self, message: Message, image_bytes: bytes, reason: str = "failed"
+    ) -> None:
         enabled = os.environ.get("SIGN_TASK_SAVE_FAILED_OCR_IMAGES", "").lower()
         if enabled not in {"1", "true", "yes", "on"}:
             return
@@ -2461,13 +2463,17 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             chat_id = getattr(getattr(message, "chat", None), "id", "unknown")
             message_id = getattr(message, "id", "unknown")
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            safe_reason = re.sub(r"[^A-Za-z0-9_-]+", "-", reason).strip("-") or "ocr"
             debug_dir = pathlib.Path(self.workdir) / "debug" / "ocr"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            debug_path = debug_dir / f"{timestamp}_chat-{chat_id}_msg-{message_id}.jpg"
+            debug_path = (
+                debug_dir
+                / f"{timestamp}_{safe_reason}_chat-{chat_id}_msg-{message_id}.jpg"
+            )
             debug_path.write_bytes(image_bytes)
-            self.log(f"已保存失败 OCR 图片用于诊断: {debug_path}")
+            self.log(f"已保存 OCR 诊断图片: {debug_path}")
         except Exception as exc:
-            self.log(f"保存失败 OCR 图片失败: {exc}", level="WARNING")
+            self.log(f"保存 OCR 诊断图片失败: {exc}", level="WARNING")
 
     def _message_is_from_today(self, message: Message) -> bool:
         message_date = getattr(message, "date", None) or getattr(
@@ -2773,14 +2779,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 system_prompt=action.ai_prompt,
             )
         except Exception:
-            self._save_failed_ocr_image(message, image_bytes)
+            self._save_ocr_debug_image(message, image_bytes, "exception")
             raise
         text = self._normalize_image_recognition_text(action, message, text)
         if not text:
-            self._save_failed_ocr_image(message, image_bytes)
+            self._save_ocr_debug_image(message, image_bytes, "empty")
             self.log("AI 未识别到可发送文本", level="WARNING")
             return False
         self.log(f"AI 识别结果：{text}")
+        if self._image_recognition_expects_verification_code(action, message):
+            self._save_ocr_debug_image(message, image_bytes, f"sent-{text}")
         await self.send_message(message.chat.id, text)
         if self._image_recognition_expects_verification_code(action, message):
             return False
