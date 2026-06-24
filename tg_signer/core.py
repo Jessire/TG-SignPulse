@@ -2131,7 +2131,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         if isinstance(action, ReplyByImageRecognitionAction):
             # Images with keyboards are usually menus or option challenges. Text
             # reply OCR should wait for a plain image; use action 4 for buttons.
-            return bool(message.photo and not self._collect_clickable_buttons(message))
+            if not (message.photo and not self._collect_clickable_buttons(message)):
+                return False
+            if self._image_recognition_expects_verification_code(action, message):
+                text = self._message_text_or_caption(message)
+                prompt_markers = ("请输入验证码", "输入验证码", "verification code", "captcha")
+                return (
+                    any(marker in text.lower() for marker in prompt_markers)
+                    and not self._message_is_verification_error_image(message)
+                )
+            return True
         if isinstance(action, ClickButtonByCalculationProblemAction):
             return bool((message.text or message.caption) and reply_markup)
         return False
