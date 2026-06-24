@@ -1110,6 +1110,7 @@ class UserSignerWorkerContext(BaseModel):
     current_action_total: Optional[int] = None
     current_action_description: str = ""
     logged_action_message_markers: set = Field(default_factory=set)
+    next_action_candidate_ids: dict = Field(default_factory=dict)
 
 
 class UserSigner(BaseUserWorker[SignConfigV3]):
@@ -1131,6 +1132,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             current_action_total=None,
             current_action_description="",
             logged_action_message_markers=set(),
+            next_action_candidate_ids=defaultdict(set),
         )
 
     @staticmethod
@@ -1499,6 +1501,9 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             try:
                 if start_index == 1:
                     self.context.chat_messages[chat.chat_id].clear()
+                    self.context.next_action_candidate_ids.setdefault(
+                        chat.chat_id, set()
+                    ).clear()
                 self.context.stop_after_current_action = False
                 self.context.stop_reason = None
                 self.context.last_callback_answer = None
@@ -2172,6 +2177,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     and getattr(message, "id", None) in changed_ids
                     and self._message_supports_next_action(next_action, message)
                 ):
+                    self._remember_next_action_candidate(chat, message)
                     return True
 
             try:
@@ -2184,10 +2190,18 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         and getattr(message, "id", None) in changed_ids
                         and self._message_supports_next_action(next_action, message)
                     ):
+                        self._remember_next_action_candidate(chat, message)
                         return True
             except Exception as e:
                 self.log(f"下一步动作候选消息检查失败: {e}", level="WARNING")
         return False
+
+    def _remember_next_action_candidate(self, chat: SignChatV3, message: Message) -> None:
+        message_id = getattr(message, "id", None)
+        if message_id is None:
+            return
+        candidates = self.context.next_action_candidate_ids.setdefault(chat.chat_id, set())
+        candidates.add(message_id)
 
     def _text_has_terminal_success_text(self, text: Optional[str]) -> bool:
         normalized = str(text or "").strip().lower()
@@ -2684,17 +2698,25 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             (
                 ReplyByCalculationProblemAction,
                 ChooseOptionByImageAction,
-                ReplyByImageRecognitionAction,
                 ClickButtonByCalculationProblemAction,
             ),
+        )
+        next_action_candidate_ids = set(
+            self.context.next_action_candidate_ids.get(chat.chat_id, set())
         )
 
         def is_new_or_changed_message(message: Optional[Message]) -> bool:
             if message is None:
                 return False
+            message_id = getattr(message, "id", None)
+            if (
+                isinstance(action, ReplyByImageRecognitionAction)
+                and message_id in next_action_candidate_ids
+                and self._message_supports_next_action(action, message)
+            ):
+                return True
             if allow_existing_candidate and self._message_supports_next_action(action, message):
                 return True
-            message_id = getattr(message, "id", None)
             return before_action_state.get(message_id) != self._message_state_marker(message)
 
         self.context.waiter.add(chat.chat_id)
@@ -2906,6 +2928,10 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     elif isinstance(action, ClickButtonByCalculationProblemAction):
                         ok = await self._click_button_by_calculation_problem(action, message)
                     if ok:
+                        if isinstance(action, ReplyByImageRecognitionAction):
+                            self.context.next_action_candidate_ids.setdefault(
+                                chat.chat_id, set()
+                            ).discard(getattr(message, "id", None))
                         # 将消息ID对应value置为None，保证收到消息的编辑时消息所处的顺序
                         self.context.chat_messages[chat.chat_id][message.id] = None
                         return None
@@ -2947,6 +2973,10 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 action, message
                             )
                         if ok:
+                            if isinstance(action, ReplyByImageRecognitionAction):
+                                self.context.next_action_candidate_ids.setdefault(
+                                    chat.chat_id, set()
+                                ).discard(getattr(message, "id", None))
                             return None
                 except Exception as e:
                     self.log(f"历史消息回退失败: {e}", level="WARNING")
