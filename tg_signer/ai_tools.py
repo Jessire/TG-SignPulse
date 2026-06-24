@@ -348,6 +348,88 @@ class AITools:
         )
         return any(indicator in text for indicator in indicators)
 
+    @staticmethod
+    def _get_exception_status_code(exc: Exception) -> int | None:
+        for attr in ("status_code", "code"):
+            value = getattr(exc, attr, None)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+
+        response = getattr(exc, "response", None)
+        value = getattr(response, "status_code", None)
+        if isinstance(value, int):
+            return value
+
+        text = str(exc)
+        for pattern in (r"Error code:\s*(\d{3})", r"['\"]code['\"]:\s*(\d{3})"):
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+        return None
+
+    @classmethod
+    def _should_retry_transient_ai_error(cls, exc: Exception) -> bool:
+        status_code = cls._get_exception_status_code(exc)
+        if status_code in {429, 500, 502, 503, 504}:
+            return True
+
+        text = str(exc).lower()
+        transient_markers = (
+            "unavailable",
+            "high demand",
+            "rate limit",
+            "rate_limit",
+            "temporarily unavailable",
+            "try again later",
+            "server error",
+            "bad gateway",
+            "gateway timeout",
+        )
+        return any(marker in text for marker in transient_markers)
+
+    @classmethod
+    def _vision_retry_attempts(cls) -> int:
+        return cls._read_positive_int_env("AI_VISION_RETRY_ATTEMPTS", 3, 1)
+
+    @staticmethod
+    def _vision_retry_delay(attempt: int) -> float:
+        try:
+            base_delay = float(os.environ.get("AI_VISION_RETRY_DELAY", "0.6"))
+        except ValueError:
+            base_delay = 0.6
+        return max(0.0, base_delay) * attempt
+
+    async def _call_visual_completion_with_retries(self, client: "AsyncOpenAI", kwargs):
+        attempts = self._vision_retry_attempts()
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await asyncio.wait_for(
+                    client.chat.completions.create(**kwargs),
+                    timeout=self._ai_timeout(),
+                )
+            except Exception as exc:
+                last_error = exc
+                if (
+                    attempt >= attempts
+                    or not self._should_retry_transient_ai_error(exc)
+                ):
+                    raise
+                delay = self._vision_retry_delay(attempt)
+                logger.warning(
+                    "Transient AI provider error, retrying visual request "
+                    "(attempt %s/%s, delay %.1fs): %s",
+                    attempt + 1,
+                    attempts,
+                    delay,
+                    exc,
+                )
+                if delay:
+                    await asyncio.sleep(delay)
+        raise last_error or RuntimeError("AI visual request failed")
+
     async def _create_visual_completion(
         self,
         *,
@@ -369,10 +451,7 @@ class AITools:
             kwargs["response_format"] = {"type": "json_object"}
 
         try:
-            return await asyncio.wait_for(
-                client.chat.completions.create(**kwargs),
-                timeout=self._ai_timeout(),
-            )
+            return await self._call_visual_completion_with_retries(client, kwargs)
         except Exception as exc:
             if not expect_json or not self._should_retry_without_json_mode(exc):
                 raise
@@ -381,10 +460,7 @@ class AITools:
                 exc,
             )
             kwargs.pop("response_format", None)
-            return await asyncio.wait_for(
-                client.chat.completions.create(**kwargs),
-                timeout=self._ai_timeout(),
-            )
+            return await self._call_visual_completion_with_retries(client, kwargs)
 
     async def choose_option_by_image(
         self,
@@ -510,11 +586,13 @@ class AITools:
                 ],
             },
         ]
-        completion = await client.chat.completions.create(
-            messages=messages,
+        completion = await self._create_visual_completion(
+            client=client,
             model=model,
-            stream=False,
+            messages=messages,
             temperature=temperature,
+            max_tokens=64,
+            expect_json=False,
         )
         return (completion.choices[0].message.content or "").strip()
 
