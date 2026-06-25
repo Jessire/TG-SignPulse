@@ -109,6 +109,15 @@ class TerminalSuccessDetectionTest(unittest.TestCase):
 
         self.assertFalse(self.signer._message_is_today_terminal_success(message))
 
+    def test_strong_success_overrides_prior_verification_error_text(self):
+        message = SimpleNamespace(
+            text=None,
+            caption="验证码错误!\n🎉 签到成功，获得了 20积分\n💰总积分：1563",
+            date=datetime.now(timezone.utc),
+        )
+
+        self.assertTrue(self.signer._message_is_today_terminal_success(message))
+
 
 class _FakeHistoryApp:
     def __init__(self, messages):
@@ -174,37 +183,42 @@ class _FakeCompletions:
 
 class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_zhipu_base_url_sends_raw_base64_image_url(self):
-        fake_completions = _FakeCompletions(
-            [
-                SimpleNamespace(
-                    choices=[
+        for base_url in (
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://api.z.ai/api/paas/v4",
+        ):
+            with self.subTest(base_url=base_url):
+                fake_completions = _FakeCompletions(
+                    [
                         SimpleNamespace(
-                            message=SimpleNamespace(content='{"options":[1]}')
-                        )
+                            choices=[
+                                SimpleNamespace(
+                                    message=SimpleNamespace(content='{"options":[1]}')
+                                )
+                            ]
+                        ),
                     ]
-                ),
-            ]
-        )
-        fake_client = SimpleNamespace(
-            chat=SimpleNamespace(completions=fake_completions)
-        )
-        tools = AITools(
-            {
-                "api_key": "test",
-                "base_url": "https://open.bigmodel.cn/api/paas/v4",
-                "model": "GLM-4.6V-Flash",
-            }
-        )
-        tools.client = fake_client
+                )
+                fake_client = SimpleNamespace(
+                    chat=SimpleNamespace(completions=fake_completions)
+                )
+                tools = AITools(
+                    {
+                        "api_key": "test",
+                        "base_url": base_url,
+                        "model": "GLM-4.6V-Flash",
+                    }
+                )
+                tools.client = fake_client
 
-        await tools.choose_options_by_image(
-            b"fake-image",
-            "Choose the correct option",
-            [(1, "apple"), (2, "banana")],
-        )
+                await tools.choose_options_by_image(
+                    b"fake-image",
+                    "Choose the correct option",
+                    [(1, "apple"), (2, "banana")],
+                )
 
-        image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
-        self.assertEqual(image_url, "ZmFrZS1pbWFnZQ==")
+                image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
+                self.assertEqual(image_url, "ZmFrZS1pbWFnZQ==")
 
     async def test_standard_base_url_sends_data_url_image_url(self):
         fake_completions = _FakeCompletions(

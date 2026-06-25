@@ -285,7 +285,7 @@ class AITools:
     def _format_image_url(self, image: bytes) -> str:
         encoded_image = encode_image(image)
         # Zhipu GLM vision endpoints expect raw base64 in image_url.url.
-        if "open.bigmodel.cn" in self.base_url.lower():
+        if any(host in self.base_url.lower() for host in ("open.bigmodel.cn", "api.z.ai")):
             return encoded_image
         return f"data:image/jpeg;base64,{encoded_image}"
 
