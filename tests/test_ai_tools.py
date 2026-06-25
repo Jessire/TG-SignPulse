@@ -123,6 +123,72 @@ class _FakeCompletions:
 
 
 class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_zhipu_base_url_sends_raw_base64_image_url(self):
+        fake_completions = _FakeCompletions(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"options":[1]}')
+                        )
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools(
+            {
+                "api_key": "test",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "model": "GLM-4.6V-Flash",
+            }
+        )
+        tools.client = fake_client
+
+        await tools.choose_options_by_image(
+            b"fake-image",
+            "Choose the correct option",
+            [(1, "apple"), (2, "banana")],
+        )
+
+        image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertEqual(image_url, "ZmFrZS1pbWFnZQ==")
+
+    async def test_standard_base_url_sends_data_url_image_url(self):
+        fake_completions = _FakeCompletions(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"options":[1]}')
+                        )
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools(
+            {
+                "api_key": "test",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o",
+            }
+        )
+        tools.client = fake_client
+
+        await tools.choose_options_by_image(
+            b"fake-image",
+            "Choose the correct option",
+            [(1, "apple"), (2, "banana")],
+        )
+
+        image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertEqual(image_url, "data:image/jpeg;base64,ZmFrZS1pbWFnZQ==")
+
     async def test_choose_options_by_image_retries_without_json_mode(self):
         fake_completions = _FakeCompletions(
             [

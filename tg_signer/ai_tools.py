@@ -179,6 +179,7 @@ class AITools:
         self.client = get_openai_client(
             api_key=cfg["api_key"], base_url=cfg.get("base_url")
         )
+        self.base_url = cfg.get("base_url") or ""
         self.default_model = cfg.get("model") or DEFAULT_MODEL
 
     @staticmethod
@@ -280,6 +281,13 @@ class AITools:
     @staticmethod
     def _format_option_lines(options: list[tuple[int, str]]) -> str:
         return "\n".join(f"{index}. {text}" for index, text in options)
+
+    def _format_image_url(self, image: bytes) -> str:
+        encoded_image = encode_image(image)
+        # Zhipu GLM vision endpoints expect raw base64 in image_url.url.
+        if "open.bigmodel.cn" in self.base_url.lower():
+            return encoded_image
+        return f"data:image/jpeg;base64,{encoded_image}"
 
     @classmethod
     def _coerce_option_index(cls, result: Any, options: list[tuple[int, str]]) -> int:
@@ -502,7 +510,7 @@ class AITools:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{encode_image(image)}"
+                            "url": self._format_image_url(image)
                         },
                     },
                 ],
@@ -553,7 +561,7 @@ class AITools:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{encode_image(image)}"
+                            "url": self._format_image_url(image)
                         },
                     },
                 ],
@@ -592,7 +600,7 @@ class AITools:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{encode_image(image)}"
+                            "url": self._format_image_url(image)
                         },
                     },
                 ],
