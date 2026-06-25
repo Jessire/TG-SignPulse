@@ -1,14 +1,11 @@
 import unittest
-from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
-from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from tg_signer.ai_tools import AITools, OpenAIConfigManager
-from tg_signer.config import ReplyByImageRecognitionAction
+from tg_signer.ai_tools import AITools
 from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
 
@@ -57,36 +54,6 @@ class AIToolsOptionParsingTest(unittest.TestCase):
             self.assertLess(prepared_image.width, 1600)
             self.assertLess(prepared_image.height, 1200)
 
-    def test_prepare_ocr_image_denoises_and_upscales_small_input(self):
-        image = Image.new("RGB", (160, 50), (60, 120, 230))
-        for x in range(40, 120):
-            for y in range(15, 35):
-                if (x + y) % 5 == 0:
-                    image.putpixel((x, y), (20, 20, 30))
-
-        buffer = BytesIO()
-        image.save(buffer, format="JPEG")
-
-        with patch.dict("os.environ", {"PADDLEOCR_TEXT_IMAGE_SCALE": "3"}):
-            prepared = AITools._prepare_ocr_image(buffer.getvalue())
-
-        with Image.open(BytesIO(prepared)) as prepared_image:
-            self.assertEqual(prepared_image.format, "PNG")
-            self.assertGreaterEqual(prepared_image.width, 480)
-            self.assertGreaterEqual(prepared_image.height, 150)
-
-    def test_extract_yellow_text_mask_keeps_yellow_captcha_text(self):
-        image = Image.new("RGB", (80, 30), (80, 55, 150))
-        for x in range(10, 30):
-            for y in range(6, 24):
-                image.putpixel((x, y), (230, 210, 70))
-
-        mask = AITools._extract_yellow_text_mask(image)
-
-        self.assertIsNotNone(mask)
-        self.assertEqual(mask.getpixel((15, 10)), 0)
-        self.assertEqual(mask.getpixel((60, 10)), 255)
-
     def test_timeout_is_treated_as_transient_ai_error(self):
         self.assertTrue(AITools._should_retry_transient_ai_error(TimeoutError()))
 
@@ -97,92 +64,6 @@ class AIToolsOptionParsingTest(unittest.TestCase):
         )
 
         self.assertFalse(AITools._should_retry_transient_ai_error(error))
-
-    def test_extracts_text_from_paddleocr_markdown_result(self):
-        response = {
-            "result": {
-                "layoutParsingResults": [
-                    {"markdown": {"text": " bxtG\n"}},
-                ]
-            }
-        }
-
-        self.assertEqual(AITools._extract_paddleocr_text(response), "bxtG")
-
-    def test_extracts_text_from_paddleocr_pruned_result(self):
-        response = {
-            "result": {
-                "layoutParsingResults": [
-                    {"prunedResult": {"rec_texts": ["b", "x", "t", "G"]}},
-                ]
-            }
-        }
-
-        self.assertEqual(AITools._extract_paddleocr_text(response), "b x t G")
-
-    def test_extracts_text_from_paddleocr_jsonl_job_result(self):
-        response = {
-            "data": {
-                "state": "done",
-                "result": [
-                    {
-                        "result": {
-                            "layoutParsingResults": [
-                                {"markdown": {"text": "mask"}},
-                            ]
-                        }
-                    }
-                ],
-            }
-        }
-
-        self.assertEqual(AITools._extract_paddleocr_text(response), "mask")
-
-    def test_coerces_paddleocr_text_to_option(self):
-        response = {
-            "result": {
-                "layoutParsingResults": [
-                    {"markdown": {"text": "mask"}},
-                ]
-            }
-        }
-
-        self.assertEqual(
-            AITools._coerce_paddleocr_option_indexes(response, self.options),
-            [4],
-        )
-
-    def test_coerces_paddleocr_json_to_option(self):
-        response = {
-            "result": {
-                "layoutParsingResults": [
-                    {"markdown": {"text": '{"options":[2]}'}},
-                ]
-            }
-        }
-
-        self.assertEqual(
-            AITools._coerce_paddleocr_option_indexes(response, self.options),
-            [2],
-        )
-
-
-class OpenAIConfigManagerTest(unittest.TestCase):
-    def test_paddleocr_env_counts_as_ai_config(self):
-        with TemporaryDirectory() as workdir, patch.dict(
-            "os.environ",
-            {
-                "PADDLEOCR_API_URL": "https://example.test/api/v2/ocr/jobs",
-                "PADDLEOCR_API_TOKEN": "token",
-            },
-            clear=True,
-        ):
-            manager = OpenAIConfigManager(workdir)
-            cfg = manager.load_config()
-
-            self.assertTrue(manager.has_config())
-
-        self.assertEqual(cfg, {"api_key": ""})
 
 
 if __name__ == "__main__":
@@ -227,47 +108,6 @@ class TerminalSuccessDetectionTest(unittest.TestCase):
 
         self.assertFalse(self.signer._message_is_today_terminal_success(message))
 
-    def test_skips_verification_error_image(self):
-        message = SimpleNamespace(text=None, caption="验证码错误!")
-
-        self.assertTrue(self.signer._message_is_verification_error_image(message))
-
-    def test_normalizes_verification_code_result(self):
-        action = ReplyByImageRecognitionAction(
-            ai_prompt="Read only the verification code from the image."
-        )
-        message = SimpleNamespace(text=None, caption="请输入验证码(不区分大小写):")
-
-        self.assertEqual(
-            self.signer._normalize_image_recognition_text(action, message, " b x t G "),
-            "bxtG",
-        )
-
-    def test_rejects_brand_text_as_verification_code(self):
-        action = ReplyByImageRecognitionAction(
-            ai_prompt="Read only the verification code from the image."
-        )
-        message = SimpleNamespace(text=None, caption="请输入验证码(不区分大小写):")
-
-        self.assertIsNone(
-            self.signer._normalize_image_recognition_text(
-                action, message, "EMBY PUBLIC\n\n# Peach"
-            )
-        )
-
-    def test_extracts_code_candidate_from_ocr_context(self):
-        action = ReplyByImageRecognitionAction(
-            ai_prompt="Read only the verification code from the image."
-        )
-        message = SimpleNamespace(text=None, caption="请输入验证码(不区分大小写):")
-
-        self.assertEqual(
-            self.signer._normalize_image_recognition_text(
-                action, message, "EMBY PUBLIC\n# Peach\nbxtG"
-            ),
-            "bxtG",
-        )
-
 
 class _FakeCompletions:
     def __init__(self, responses):
@@ -283,67 +123,81 @@ class _FakeCompletions:
 
 
 class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
-    async def test_choose_options_by_image_requires_paddleocr(self):
-        fake_completions = _FakeCompletions([])
-        fake_client = SimpleNamespace(
-            chat=SimpleNamespace(completions=fake_completions)
-        )
-        tools = AITools({"api_key": "test", "model": "gpt-4o"})
-        tools.client = fake_client
-
-        with patch.dict("os.environ", {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "PADDLEOCR_API_TOKEN"):
-                await tools.choose_options_by_image(
-                    b"fake-image",
-                    "Choose the correct option",
-                    [(1, "apple"), (2, "banana")],
-                )
-
-        self.assertEqual(fake_completions.calls, [])
-
-    async def test_extract_text_by_image_requires_paddleocr(self):
-        fake_completions = _FakeCompletions([])
-        fake_client = SimpleNamespace(
-            chat=SimpleNamespace(completions=fake_completions)
-        )
-        tools = AITools({"api_key": "test", "model": "gpt-4o"})
-        tools.client = fake_client
-
-        with patch.dict("os.environ", {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "PADDLEOCR_API_TOKEN"):
-                await tools.extract_text_by_image(b"fake-image")
-
-        self.assertEqual(fake_completions.calls, [])
-
-    async def test_choose_options_by_image_uses_paddleocr_when_configured(self):
-        fake_completions = _FakeCompletions([])
-        tools = AITools({"api_key": "test", "model": "gpt-4o"})
-        tools.client = SimpleNamespace(
-            chat=SimpleNamespace(completions=fake_completions)
-        )
-
-        async def fake_request(_image, **_kwargs):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {"markdown": {"text": "banana"}},
+    async def test_choose_options_by_image_retries_without_json_mode(self):
+        fake_completions = _FakeCompletions(
+            [
+                RuntimeError("Error code: 403 - {'message': 'openai_error', 'code': 'bad_response_status_code', 'detail': 'response_format json_object unsupported'}"),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"options":[2]}')
+                        )
                     ]
-                }
-            }
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = fake_client
 
-        tools._request_paddleocr = fake_request
-        with patch.dict(
-            "os.environ",
-            {
-                "PADDLEOCR_API_URL": "https://example.test/api/v2/ocr/jobs",
-                "PADDLEOCR_API_TOKEN": "token",
-            },
-        ):
-            result = await tools.choose_options_by_image(
-                b"fake-image",
-                "Choose the correct option",
-                [(1, "apple"), (2, "banana")],
-            )
+        result = await tools.choose_options_by_image(
+            b"fake-image",
+            "Choose the correct option",
+            [(1, "apple"), (2, "banana")],
+        )
 
         self.assertEqual(result, [2])
-        self.assertEqual(fake_completions.calls, [])
+        self.assertIn("response_format", fake_completions.calls[0])
+        self.assertNotIn("response_format", fake_completions.calls[1])
+
+    async def test_choose_options_by_image_retries_transient_provider_errors(self):
+        fake_completions = _FakeCompletions(
+            [
+                RuntimeError("Error code: 503 - {'error': {'status': 'UNAVAILABLE'}}"),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"options":[2]}')
+                        )
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = fake_client
+
+        result = await tools.choose_options_by_image(
+            b"fake-image",
+            "Choose the correct option",
+            [(1, "apple"), (2, "banana")],
+        )
+
+        self.assertEqual(result, [2])
+        self.assertEqual(len(fake_completions.calls), 2)
+
+    async def test_extract_text_by_image_retries_transient_provider_errors(self):
+        fake_completions = _FakeCompletions(
+            [
+                RuntimeError("Error code: 503 - {'error': {'status': 'UNAVAILABLE'}}"),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content="bxtG"))
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = fake_client
+
+        result = await tools.extract_text_by_image(b"fake-image")
+
+        self.assertEqual(result, "bxtG")
+        self.assertEqual(len(fake_completions.calls), 2)

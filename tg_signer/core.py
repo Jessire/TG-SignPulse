@@ -4,7 +4,6 @@ import logging
 import os
 import pathlib
 import random
-import re
 import sqlite3
 import time
 import unicodedata
@@ -300,7 +299,7 @@ DICE_EMOJIS = ("🎲", "🎯", "🏀", "⚽", "🎳", "🎰")
 
 Session.START_TIMEOUT = 5  # 原始超时时间为2秒，但一些代理访问会超时，所以这里调大一点
 
-OPENAI_USE_PROMPT = "当前任务需要图像识别，请确保运行前正确设置`PADDLEOCR_API_TOKEN`和`PADDLEOCR_API_URL`环境变量。"
+OPENAI_USE_PROMPT = "当前任务需要配置大模型，请确保运行前正确设置`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`等环境变量，或通过`tg-signer llm-config`持久化配置。"
 
 
 def _is_callback_data_invalid(exc: BaseException) -> bool:
@@ -1552,22 +1551,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         next_action = (
                             chat.actions[index] if index < total_actions else None
                         )
-                        if (
-                            next_action is not None
-                            and isinstance(action, ClickKeyboardByTextAction)
-                            and await self._chat_has_action_candidate(
-                                chat,
-                                next_action,
-                                history_limit=_read_positive_int_env(
-                                    "SIGN_TASK_HISTORY_LOOKBACK", 12, 3
-                                ),
-                            )
-                        ):
-                            self.log(
-                                f"检测到下一步动作候选已出现，跳过当前步骤：{action_description}"
-                            )
-                            last_successful_index = index
-                            continue
                         result = await self.wait_for(
                             chat,
                             action,
@@ -2147,16 +2130,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         if isinstance(action, ReplyByImageRecognitionAction):
             # Images with keyboards are usually menus or option challenges. Text
             # reply OCR should wait for a plain image; use action 4 for buttons.
-            if not (message.photo and not self._collect_clickable_buttons(message)):
-                return False
-            if self._image_recognition_expects_verification_code(action, message):
-                text = self._message_text_or_caption(message)
-                prompt_markers = ("请输入验证码", "输入验证码", "verification code", "captcha")
-                return (
-                    any(marker in text.lower() for marker in prompt_markers)
-                    and not self._message_is_verification_error_image(message)
-                )
-            return True
+            return bool(message.photo and not self._collect_clickable_buttons(message))
         if isinstance(action, ClickButtonByCalculationProblemAction):
             return bool((message.text or message.caption) and reply_markup)
         return False
@@ -2173,7 +2147,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             if self._message_matches_chat_thread(message, chat) and (
                 self._message_supports_next_action(action, message)
             ):
-                self._remember_next_action_candidate(chat, message)
                 return True
 
         try:
@@ -2184,7 +2157,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 if self._message_matches_chat_thread(message, chat) and (
                     self._message_supports_next_action(action, message)
                 ):
-                    self._remember_next_action_candidate(chat, message)
                     return True
         except Exception as e:
             self.log(f"下一步动作候选消息检查失败: {e}", level="WARNING")
@@ -2375,105 +2347,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             if item
         )
         return self._text_has_terminal_success_text(text)
-
-    @staticmethod
-    def _message_text_or_caption(message: Message) -> str:
-        return str(
-            getattr(message, "caption", None) or getattr(message, "text", None) or ""
-        )
-
-    @classmethod
-    def _image_recognition_expects_verification_code(
-        cls, action: ReplyByImageRecognitionAction, message: Message
-    ) -> bool:
-        text = " ".join(
-            (
-                str(getattr(action, "ai_prompt", "") or ""),
-                cls._message_text_or_caption(message),
-            )
-        ).lower()
-        markers = (
-            "验证码",
-            "verification code",
-            "captcha",
-            "code characters",
-            "only the code",
-        )
-        return any(marker in text for marker in markers)
-
-    @classmethod
-    def _message_is_verification_error_image(cls, message: Message) -> bool:
-        text = cls._message_text_or_caption(message).lower()
-        if not text:
-            return False
-        prompt_markers = ("请输入验证码", "输入验证码", "verification code", "captcha")
-        if any(marker in text for marker in prompt_markers):
-            return False
-        failure_markers = ("验证码错误", "错误", "失败", "过期", "error", "wrong")
-        return "验证码" in text and any(marker in text for marker in failure_markers)
-
-    @classmethod
-    def _normalize_image_recognition_text(
-        cls, action: ReplyByImageRecognitionAction, message: Message, text: str
-    ) -> Optional[str]:
-        text = (text or "").strip()
-        if not text:
-            return None
-        if not cls._image_recognition_expects_verification_code(action, message):
-            return text
-
-        compact = re.sub(r"\s+", "", text)
-        if re.fullmatch(r"[A-Za-z0-9]{3,12}", compact):
-            return compact
-        stopwords = {
-            "emby",
-            "public",
-            "peach",
-            "captcha",
-            "code",
-            "verification",
-        }
-        candidates = []
-        for candidate in re.findall(r"[A-Za-z0-9]{3,12}", text):
-            if candidate.lower() not in stopwords:
-                candidates.append(candidate)
-        if candidates:
-            preferred = [
-                candidate
-                for candidate in candidates
-                if 3 <= len(candidate) <= 8
-                and (
-                    any(char.isdigit() for char in candidate)
-                    or (
-                        any(char.islower() for char in candidate)
-                        and any(char.isupper() for char in candidate)
-                    )
-                )
-            ]
-            return (preferred or candidates)[-1]
-        return None
-
-    def _save_ocr_debug_image(
-        self, message: Message, image_bytes: bytes, reason: str = "failed"
-    ) -> None:
-        enabled = os.environ.get("SIGN_TASK_SAVE_FAILED_OCR_IMAGES", "").lower()
-        if enabled not in {"1", "true", "yes", "on"}:
-            return
-        try:
-            chat_id = getattr(getattr(message, "chat", None), "id", "unknown")
-            message_id = getattr(message, "id", "unknown")
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            safe_reason = re.sub(r"[^A-Za-z0-9_-]+", "-", reason).strip("-") or "ocr"
-            debug_dir = pathlib.Path(self.workdir) / "debug" / "ocr"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            debug_path = (
-                debug_dir
-                / f"{timestamp}_{safe_reason}_chat-{chat_id}_msg-{message_id}.jpg"
-            )
-            debug_path.write_bytes(image_bytes)
-            self.log(f"已保存 OCR 诊断图片: {debug_path}")
-        except Exception as exc:
-            self.log(f"保存 OCR 诊断图片失败: {exc}", level="WARNING")
 
     def _message_is_from_today(self, message: Message) -> bool:
         message_date = getattr(message, "date", None) or getattr(
@@ -2761,9 +2634,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         if self._collect_clickable_buttons(message):
             self.log("跳过带按钮的图片消息，等待真正的验证码/题目图片")
             return False
-        if self._message_is_verification_error_image(message):
-            self.log("跳过验证码错误提示图片，等待新的验证码图片")
-            return False
         self._log_received_target_message(message)
         self.log("AI 正在分析图片中的文字")
         image_buffer: BinaryIO = await self.app.download_media(
@@ -2773,80 +2643,17 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
         image_bytes = image_buffer.read()
         if (action.ai_prompt or "").strip():
             self.log("当前 AI 动作使用自定义提示词")
-        try:
-            text = await self.get_ai_tools().extract_text_by_image(
-                image_bytes,
-                system_prompt=action.ai_prompt,
-            )
-        except Exception:
-            self._save_ocr_debug_image(message, image_bytes, "exception")
-            raise
-        text = self._normalize_image_recognition_text(action, message, text)
+        text = await self.get_ai_tools().extract_text_by_image(
+            image_bytes,
+            system_prompt=action.ai_prompt,
+        )
+        text = (text or "").strip()
         if not text:
-            self._save_ocr_debug_image(message, image_bytes, "empty")
             self.log("AI 未识别到可发送文本", level="WARNING")
             return False
         self.log(f"AI 识别结果：{text}")
-        expects_verification_code = self._image_recognition_expects_verification_code(
-            action, message
-        )
-        verification_chat = None
-        before_send_state = None
-        if expects_verification_code:
-            self._save_ocr_debug_image(message, image_bytes, f"sent-{text}")
-            verification_chat = SimpleNamespace(
-                chat_id=message.chat.id,
-                message_thread_id=self._resolve_message_thread_id(message),
-            )
-            before_send_state = await self._chat_state_snapshot(
-                verification_chat,
-                history_limit=_read_positive_int_env("SIGN_TASK_HISTORY_LOOKBACK", 12, 3),
-            )
         await self.send_message(message.chat.id, text)
-        if expects_verification_code:
-            return await self._wait_for_verification_result(
-                verification_chat,
-                before_send_state or {},
-                timeout=_read_positive_float_env(
-                    "SIGN_TASK_VERIFICATION_RESULT_TIMEOUT", 10.0, 2.0
-                ),
-            )
         return True
-
-    async def _wait_for_verification_result(
-        self,
-        chat,
-        before_state: dict[int, tuple],
-        *,
-        timeout: float,
-    ) -> bool:
-        deadline = time.perf_counter() + timeout
-        history_limit = _read_positive_int_env("SIGN_TASK_HISTORY_LOOKBACK", 12, 3)
-        while time.perf_counter() < deadline:
-            await asyncio.sleep(0.4)
-            try:
-                async for reply in self.app.get_chat_history(
-                    chat.chat_id,
-                    limit=history_limit,
-                ):
-                    if not self._message_matches_chat_thread(reply, chat):
-                        continue
-                    message_id = getattr(reply, "id", None)
-                    if before_state.get(message_id) == self._message_state_marker(reply):
-                        continue
-                    self._log_received_target_message(reply)
-                    if self._message_is_today_terminal_success(reply):
-                        self.context.stop_after_current_action = True
-                        self.context.stop_reason = self._summarize_target_message(reply)
-                        return True
-                    if self._message_is_verification_error_image(reply):
-                        self.log("验证码提交后收到错误提示", level="WARNING")
-                        return False
-            except Exception as exc:
-                self.log(f"验证码结果检查失败: {exc}", level="WARNING")
-                return False
-        self.log("验证码提交后未等到明确结果", level="WARNING")
-        return False
 
     async def _click_button_by_calculation_problem(
         self, action: ClickButtonByCalculationProblemAction, message
