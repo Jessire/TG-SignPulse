@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from tg_signer.config import ReplyByImageRecognitionAction, SignChatV3
 from tg_signer.ai_tools import AITools
 from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
@@ -107,6 +108,55 @@ class TerminalSuccessDetectionTest(unittest.TestCase):
         )
 
         self.assertFalse(self.signer._message_is_today_terminal_success(message))
+
+
+class _FakeHistoryApp:
+    def __init__(self, messages):
+        self.messages = messages
+
+    def get_chat_history(self, chat_id, limit):
+        async def generate():
+            for message in self.messages[:limit]:
+                yield message
+
+        return generate()
+
+
+class WaitForTerminalSuccessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_for_accepts_existing_today_terminal_success_from_history(self):
+        signer = object.__new__(UserSigner)
+        signer.context = signer.ensure_ctx()
+        signer.log = lambda *args, **kwargs: None
+        chat = SignChatV3(
+            chat_id=8060839337,
+            name="Peach Emby",
+            actions=[ReplyByImageRecognitionAction()],
+        )
+        message = SimpleNamespace(
+            id=99,
+            chat=SimpleNamespace(id=chat.chat_id),
+            text=None,
+            caption="🎉 签到成功，获得了 20积分",
+            photo=SimpleNamespace(file_id="photo"),
+            media=None,
+            reply_markup=None,
+            date=datetime.now(timezone.utc),
+            edit_date=None,
+            message_thread_id=None,
+            reply_to_top_message_id=None,
+        )
+        signer.app = _FakeHistoryApp([message])
+        before_action_state = {message.id: signer._message_state_marker(message)}
+
+        result = await signer.wait_for(
+            chat,
+            ReplyByImageRecognitionAction(),
+            timeout=0.05,
+            before_action_state=before_action_state,
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(signer.context.stop_after_current_action)
 
 
 class _FakeCompletions:

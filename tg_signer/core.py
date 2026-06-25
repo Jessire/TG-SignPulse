@@ -2997,12 +2997,12 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         continue
                     self.context.waiting_message = message
                     self._log_received_target_message(message)
-                    if not is_new_or_changed_message(message):
-                        continue
                     if self._message_is_today_terminal_success(message):
                         self.context.stop_after_current_action = True
                         self.context.stop_reason = self._summarize_target_message(message)
                         return None
+                    if not is_new_or_changed_message(message):
+                        continue
                     ok = False
                     if isinstance(action, ClickKeyboardByTextAction):
                         ok = await self._click_keyboard_by_text(
@@ -3041,12 +3041,12 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     self.log("等待超时，尝试从最近消息回退处理当前步骤", level="WARNING")
                     async for message in self.app.get_chat_history(chat.chat_id, limit=history_limit):
                         self._log_received_target_message(message)
-                        if not is_new_or_changed_message(message):
-                            continue
                         if self._message_is_today_terminal_success(message):
                             self.context.stop_after_current_action = True
                             self.context.stop_reason = self._summarize_target_message(message)
                             return None
+                        if not is_new_or_changed_message(message):
+                            continue
                         if isinstance(action, ClickKeyboardByTextAction):
                             ok = await self._click_keyboard_by_text(
                                 action,
