@@ -2782,6 +2782,35 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 return True
             return before_action_state.get(message_id) != self._message_state_marker(message)
 
+        def action_submits_challenge_response() -> bool:
+            return isinstance(
+                action,
+                (
+                    ReplyByCalculationProblemAction,
+                    ChooseOptionByImageAction,
+                    ReplyByImageRecognitionAction,
+                    ClickButtonByCalculationProblemAction,
+                ),
+            )
+
+        async def confirm_terminal_success_after_submit() -> None:
+            if not action_submits_challenge_response():
+                return
+            follow_timeout = min(
+                _read_positive_float_env("SIGN_TASK_SUBMIT_CONFIRM_TIMEOUT", 6.0, 0.5),
+                timeout,
+            )
+            if await self._wait_for_terminal_success(
+                chat,
+                before_action_state,
+                history_limit=history_limit,
+                timeout=follow_timeout,
+            ):
+                self.context.stop_after_current_action = True
+                self.log(
+                    f"{self._current_action_step_label()}提交答案后已检测到任务完成响应"
+                )
+
         self.context.waiter.add(chat.chat_id)
         start = time.perf_counter()
         last_message = None
@@ -3023,6 +3052,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             self.context.next_action_candidate_ids.setdefault(
                                 chat.chat_id, set()
                             ).discard(getattr(message, "id", None))
+                        await confirm_terminal_success_after_submit()
                         # 将消息ID对应value置为None，保证收到消息的编辑时消息所处的顺序
                         self.context.chat_messages[chat.chat_id][message.id] = None
                         return None
@@ -3068,6 +3098,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 self.context.next_action_candidate_ids.setdefault(
                                     chat.chat_id, set()
                                 ).discard(getattr(message, "id", None))
+                            await confirm_terminal_success_after_submit()
                             return None
                 except Exception as e:
                     self.log(f"历史消息回退失败: {e}", level="WARNING")
