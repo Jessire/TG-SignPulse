@@ -2,12 +2,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
 from tg_signer.ai_tools import AITools
 from tg_signer.config import (
     ChooseOptionByImageAction,
+    ClickKeyboardByTextAction,
     ReplyByImageRecognitionAction,
     SignChatV3,
 )
@@ -156,6 +158,40 @@ class _FakeHistoryApp:
 
 
 class WaitForTerminalSuccessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_click_button_wait_stops_on_explicit_today_success_without_date(self):
+        signer = object.__new__(UserSigner)
+        signer.context = signer.ensure_ctx()
+        signer.log = lambda *args, **kwargs: None
+        chat = SignChatV3(
+            chat_id=8468306814,
+            name="EmbyPulse",
+            actions=[ClickKeyboardByTextAction(text="每日签到")],
+        )
+        message = SimpleNamespace(
+            id=300,
+            chat=SimpleNamespace(id=chat.chat_id),
+            text="😊 今天已经签到过了，明天再来吧！",
+            caption=None,
+            photo=None,
+            media=None,
+            reply_markup=None,
+            date=None,
+            edit_date=None,
+            message_thread_id=None,
+            reply_to_top_message_id=None,
+        )
+        signer.app = _FakeHistoryApp([message])
+
+        result = await signer.wait_for(
+            chat,
+            ClickKeyboardByTextAction(text="每日签到"),
+            timeout=0.05,
+            before_action_state={},
+        )
+
+        self.assertTrue(result)
+        self.assertTrue(signer.context.stop_after_current_action)
+
     async def test_wait_for_accepts_existing_today_terminal_success_from_history(self):
         signer = object.__new__(UserSigner)
         signer.context = signer.ensure_ctx()
@@ -321,7 +357,7 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
         image.save(buffer, format="PNG")
         return buffer.getvalue()
 
-    async def test_extract_text_by_image_sends_captcha_variant_before_original(self):
+    async def test_extract_text_by_image_sends_only_captcha_variant_first(self):
         fake_completions = _FakeCompletions(
             [
                 SimpleNamespace(
@@ -342,7 +378,41 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "IkKR")
         content = fake_completions.calls[0]["messages"][1]["content"]
         image_parts = [part for part in content if part["type"] == "image_url"]
-        self.assertGreaterEqual(len(image_parts), 2)
+        self.assertEqual(len(image_parts), 1)
+
+    async def test_extract_text_by_image_tries_variants_one_at_a_time_when_empty(self):
+        fake_completions = _FakeCompletions(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content=""))
+                    ]
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content="IkKR"))
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = fake_client
+
+        with patch.dict(
+            "os.environ",
+            {"AI_VISION_RETRY_ATTEMPTS": "2", "AI_VISION_RETRY_DELAY": "0"},
+        ):
+            result = await tools.extract_text_by_image(self._red_captcha_bytes())
+
+        self.assertEqual(result, "IkKR")
+        self.assertEqual(len(fake_completions.calls), 2)
+        for call in fake_completions.calls:
+            content = call["messages"][1]["content"]
+            image_parts = [part for part in content if part["type"] == "image_url"]
+            self.assertEqual(len(image_parts), 1)
 
     async def test_zhipu_base_url_sends_raw_base64_image_url(self):
         for base_url in (
