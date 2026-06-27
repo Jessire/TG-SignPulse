@@ -12,10 +12,9 @@ import json_repair
 from typing_extensions import Optional, Required, TypedDict
 
 try:
-    from PIL import Image, ImageFilter
+    from PIL import Image
 except Exception:  # pragma: no cover - Pillow is optional at runtime
     Image = None
-    ImageFilter = None
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI  # 在性能弱的机器上导入openai包实在有些慢
@@ -278,94 +277,6 @@ class AITools:
         output = io.BytesIO()
         prepared.save(output, format="JPEG", quality=quality, optimize=True)
         return output.getvalue()
-
-    @classmethod
-    def _isolate_red_text_image(cls, image: "Image.Image") -> bytes | None:
-        prepared = cls._crop_light_border(image.convert("RGB"))
-        mask = Image.new("L", prepared.size, 255)
-        source_pixels = prepared.load()
-        mask_pixels = mask.load()
-        for y in range(prepared.height):
-            for x in range(prepared.width):
-                red, green, blue = source_pixels[x, y]
-                red_score = red - max(green, blue * 0.72)
-                dark_red_score = red - green
-                if (
-                    (red_score > 18 and dark_red_score > 35 and red > 60)
-                    or (red > 105 and green < 85 and blue < 140)
-                ):
-                    mask_pixels[x, y] = 0
-
-        if ImageFilter is not None:
-            mask = mask.filter(ImageFilter.MedianFilter(3))
-            mask = mask.filter(ImageFilter.MinFilter(3))
-
-        foreground = mask.point(lambda px: 255 if px < 128 else 0)
-        bbox = foreground.getbbox()
-        if not bbox:
-            return None
-
-        histogram = mask.histogram()
-        black_pixels = sum(histogram[:128])
-        total_pixels = max(mask.width * mask.height, 1)
-        black_ratio = black_pixels / total_pixels
-        if black_pixels < 30 or black_ratio > 0.35:
-            return None
-
-        padding = max(8, min(mask.size) // 24)
-        left = max(0, bbox[0] - padding)
-        top = max(0, bbox[1] - padding)
-        right = min(mask.width, bbox[2] + padding)
-        bottom = min(mask.height, bbox[3] + padding)
-        mask = mask.crop((left, top, right, bottom))
-
-        isolated = Image.new("RGB", mask.size, "white")
-        isolated_pixels = isolated.load()
-        mask_pixels = mask.load()
-        for y in range(mask.height):
-            for x in range(mask.width):
-                if mask_pixels[x, y] < 128:
-                    isolated_pixels[x, y] = (0, 0, 0)
-
-        ocr_max_edge = cls._read_positive_int_env("AI_VISION_OCR_MAX_EDGE", 900, 320)
-        max_edge = max(isolated.size)
-        if max_edge < ocr_max_edge:
-            scale = min(2.0, ocr_max_edge / max_edge)
-            if scale > 1.05:
-                isolated = isolated.resize(
-                    (
-                        max(1, int(isolated.width * scale)),
-                        max(1, int(isolated.height * scale)),
-                    ),
-                    getattr(Image, "Resampling", Image).LANCZOS,
-                )
-        elif max_edge > ocr_max_edge:
-            isolated.thumbnail(
-                (ocr_max_edge, ocr_max_edge),
-                getattr(Image, "Resampling", Image).LANCZOS,
-            )
-
-        output = io.BytesIO()
-        isolated.save(output, format="JPEG", quality=92, optimize=True)
-        return output.getvalue()
-
-    @classmethod
-    def _prepare_text_extraction_images(cls, image: bytes) -> list[bytes]:
-        base_image = cls._prepare_vision_image(image)
-        if Image is None:
-            return [base_image]
-
-        variants: list[bytes] = []
-        try:
-            with Image.open(io.BytesIO(image)) as raw_image:
-                red_text_image = cls._isolate_red_text_image(raw_image)
-        except Exception:
-            red_text_image = None
-
-        if red_text_image:
-            variants.append(red_text_image)
-        variants.append(base_image)
-        return variants
 
     @staticmethod
     def _format_option_lines(options: list[tuple[int, str]]) -> str:
@@ -680,52 +591,30 @@ class AITools:
         client = client or self.client
         model = model or self.default_model
         text_query = query or "Extract the key text from this image."
-        text_query = (
-            f"{text_query}\nIf multiple images are provided, they are alternate "
-            "views of the same target; use the clearest processed image."
-        )
-        image_parts = [
-            {
-                "type": "image_url",
-                "image_url": {"url": self._format_image_url(prepared_image)},
-            }
-            for prepared_image in self._prepare_text_extraction_images(image)
-        ]
         messages = [
             {"role": "system", "content": sys_prompt},
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": text_query},
-                    *image_parts,
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": self._format_image_url(image)
+                        },
+                    },
                 ],
             },
         ]
-        attempts = self._vision_retry_attempts()
-        for attempt in range(1, attempts + 1):
-            completion = await self._create_visual_completion(
-                client=client,
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=64,
-                expect_json=False,
-            )
-            text = (completion.choices[0].message.content or "").strip()
-            if text or attempt >= attempts:
-                return text
-
-            delay = self._vision_retry_delay(attempt)
-            logger.warning(
-                "AI provider returned empty OCR text, retrying visual request "
-                "(attempt %s/%s, delay %.1fs)",
-                attempt + 1,
-                attempts,
-                delay,
-            )
-            if delay:
-                await asyncio.sleep(delay)
-        return ""
+        completion = await self._create_visual_completion(
+            client=client,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=64,
+            expect_json=False,
+        )
+        return (completion.choices[0].message.content or "").strip()
 
     async def calculate_problem(
         self,
