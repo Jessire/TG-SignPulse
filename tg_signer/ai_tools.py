@@ -681,41 +681,39 @@ class AITools:
         model = model or self.default_model
         text_query = query or "Extract the key text from this image."
         text_query = (
-            f"{text_query}\nUse this single image only. Return the clearest "
-            "target text."
+            f"{text_query}\nIf multiple images are provided, they are alternate "
+            "views of the same target; use the clearest processed image."
         )
-        prepared_images = self._prepare_text_extraction_images(image)
+        image_parts = [
+            {
+                "type": "image_url",
+                "image_url": {"url": self._format_image_url(prepared_image)},
+            }
+            for prepared_image in self._prepare_text_extraction_images(image)
+        ]
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text_query},
+                    *image_parts,
+                ],
+            },
+        ]
         attempts = self._vision_retry_attempts()
         for attempt in range(1, attempts + 1):
-            for prepared_image in prepared_images:
-                messages = [
-                    {"role": "system", "content": sys_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": text_query},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": self._format_image_url(prepared_image)
-                                },
-                            },
-                        ],
-                    },
-                ]
-                completion = await self._create_visual_completion(
-                    client=client,
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=64,
-                    expect_json=False,
-                )
-                text = (completion.choices[0].message.content or "").strip()
-                if text:
-                    return text
-            if attempt >= attempts:
-                return ""
+            completion = await self._create_visual_completion(
+                client=client,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=64,
+                expect_json=False,
+            )
+            text = (completion.choices[0].message.content or "").strip()
+            if text or attempt >= attempts:
+                return text
 
             delay = self._vision_retry_delay(attempt)
             logger.warning(

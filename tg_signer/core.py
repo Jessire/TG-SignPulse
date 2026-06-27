@@ -2782,16 +2782,6 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 return True
             return before_action_state.get(message_id) != self._message_state_marker(message)
 
-        def is_current_action_terminal_success(message: Optional[Message]) -> bool:
-            if message is None:
-                return False
-            if self._message_is_today_terminal_success(message):
-                return True
-            return (
-                is_new_or_changed_message(message)
-                and self._message_has_terminal_success_text(message)
-            )
-
         def action_submits_challenge_response() -> bool:
             return isinstance(
                 action,
@@ -2837,7 +2827,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                             continue
                         self._log_received_target_message(message)
                         self.context.waiting_message = message
-                        if is_current_action_terminal_success(message):
+                        if self._message_is_today_terminal_success(message):
                             self.context.stop_after_current_action = True
                             self.context.stop_reason = self._summarize_target_message(message)
                             return True
@@ -2933,7 +2923,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                                 if not self._message_matches_chat_thread(message, chat):
                                     continue
                                 self._log_received_target_message(message)
-                                if is_current_action_terminal_success(message):
+                                if self._message_is_today_terminal_success(message):
                                     self.context.stop_after_current_action = True
                                     self.context.stop_reason = self._summarize_target_message(message)
                                     return True
@@ -3036,7 +3026,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                         continue
                     self.context.waiting_message = message
                     self._log_received_target_message(message)
-                    if is_current_action_terminal_success(message):
+                    if self._message_is_today_terminal_success(message):
                         self.context.stop_after_current_action = True
                         self.context.stop_reason = self._summarize_target_message(message)
                         return None
@@ -3081,7 +3071,7 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                     self.log("等待超时，尝试从最近消息回退处理当前步骤", level="WARNING")
                     async for message in self.app.get_chat_history(chat.chat_id, limit=history_limit):
                         self._log_received_target_message(message)
-                        if is_current_action_terminal_success(message):
+                        if self._message_is_today_terminal_success(message):
                             self.context.stop_after_current_action = True
                             self.context.stop_reason = self._summarize_target_message(message)
                             return None
