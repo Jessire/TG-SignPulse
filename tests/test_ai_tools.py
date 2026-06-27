@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from tg_signer.ai_tools import AITools
 from tg_signer.config import (
@@ -69,6 +69,26 @@ class AIToolsOptionParsingTest(unittest.TestCase):
         )
 
         self.assertFalse(AITools._should_retry_transient_ai_error(error))
+
+    def test_prepare_text_extraction_images_adds_red_captcha_variant(self):
+        image = Image.new("RGB", (320, 120), (93, 75, 210))
+        draw = ImageDraw.Draw(image)
+        draw.text((40, 28), "IkKR", fill=(150, 30, 38))
+
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+
+        variants = AITools._prepare_text_extraction_images(buffer.getvalue())
+
+        self.assertGreaterEqual(len(variants), 2)
+        with Image.open(BytesIO(variants[0])) as prepared:
+            self.assertEqual(prepared.mode, "RGB")
+            gray = prepared.convert("L")
+            histogram = gray.histogram()
+            dark_pixels = sum(histogram[:64])
+            light_pixels = sum(histogram[221:])
+            self.assertGreater(dark_pixels, 20)
+            self.assertGreater(light_pixels, dark_pixels * 5)
 
 
 if __name__ == "__main__":
@@ -292,6 +312,38 @@ class _FakeCompletions:
 
 
 class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _red_captcha_bytes():
+        image = Image.new("RGB", (320, 120), (93, 75, 210))
+        draw = ImageDraw.Draw(image)
+        draw.text((40, 28), "IkKR", fill=(150, 30, 38))
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    async def test_extract_text_by_image_sends_captcha_variant_before_original(self):
+        fake_completions = _FakeCompletions(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content="IkKR"))
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = fake_client
+
+        result = await tools.extract_text_by_image(self._red_captcha_bytes())
+
+        self.assertEqual(result, "IkKR")
+        content = fake_completions.calls[0]["messages"][1]["content"]
+        image_parts = [part for part in content if part["type"] == "image_url"]
+        self.assertGreaterEqual(len(image_parts), 2)
+
     async def test_zhipu_base_url_sends_raw_base64_image_url(self):
         for base_url in (
             "https://open.bigmodel.cn/api/paas/v4",
@@ -440,4 +492,30 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
         result = await tools.extract_text_by_image(b"fake-image")
 
         self.assertEqual(result, "bxtG")
+        self.assertEqual(len(fake_completions.calls), 2)
+
+    async def test_extract_text_by_image_retries_empty_provider_response(self):
+        fake_completions = _FakeCompletions(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content=""))
+                    ]
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content="IkKR"))
+                    ]
+                ),
+            ]
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        tools = AITools({"api_key": "test", "model": "gpt-4o"})
+        tools.client = fake_client
+
+        result = await tools.extract_text_by_image(b"fake-image")
+
+        self.assertEqual(result, "IkKR")
         self.assertEqual(len(fake_completions.calls), 2)
