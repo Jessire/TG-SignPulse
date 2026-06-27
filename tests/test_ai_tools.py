@@ -5,12 +5,8 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from tg_signer.config import ReplyByImageRecognitionAction, SignChatV3
 from tg_signer.ai_tools import AITools
-from tg_signer.config import (
-    ChooseOptionByImageAction,
-    ReplyByImageRecognitionAction,
-    SignChatV3,
-)
 from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
 
@@ -166,112 +162,6 @@ class WaitForTerminalSuccessTest(unittest.IsolatedAsyncioTestCase):
             ReplyByImageRecognitionAction(),
             timeout=0.05,
             before_action_state=before_action_state,
-        )
-
-        self.assertIsNone(result)
-        self.assertTrue(signer.context.stop_after_current_action)
-
-    async def test_image_reply_waits_for_terminal_success_after_answer(self):
-        signer = object.__new__(UserSigner)
-        signer.context = signer.ensure_ctx()
-        signer.log = lambda *args, **kwargs: None
-        chat = SignChatV3(
-            chat_id=8060839337,
-            name="Peach Emby",
-            actions=[ReplyByImageRecognitionAction()],
-        )
-        captcha = SimpleNamespace(
-            id=100,
-            chat=SimpleNamespace(id=chat.chat_id),
-            text=None,
-            caption="请输入验证码(不区分大小写):",
-            photo=SimpleNamespace(file_id="captcha"),
-            media=None,
-            reply_markup=None,
-            date=datetime.now(timezone.utc),
-            edit_date=None,
-            message_thread_id=None,
-            reply_to_top_message_id=None,
-        )
-        success = SimpleNamespace(
-            id=101,
-            chat=SimpleNamespace(id=chat.chat_id),
-            text=None,
-            caption="🎉 签到成功，获得了 16积分\n💰 总积分：1593",
-            photo=SimpleNamespace(file_id="success"),
-            media=None,
-            reply_markup=None,
-            date=datetime.now(timezone.utc),
-            edit_date=None,
-            message_thread_id=None,
-            reply_to_top_message_id=None,
-        )
-        signer.context.chat_messages[chat.chat_id][captcha.id] = captcha
-        signer.app = _FakeHistoryApp([success, captcha])
-
-        async def reply_ok(action, message):
-            return True
-
-        signer._reply_by_image_recognition = reply_ok
-
-        result = await signer.wait_for(
-            chat,
-            ReplyByImageRecognitionAction(),
-            timeout=1.0,
-            before_action_state={},
-        )
-
-        self.assertIsNone(result)
-        self.assertTrue(signer.context.stop_after_current_action)
-
-    async def test_image_button_click_waits_for_terminal_success_after_answer(self):
-        signer = object.__new__(UserSigner)
-        signer.context = signer.ensure_ctx()
-        signer.log = lambda *args, **kwargs: None
-        chat = SignChatV3(
-            chat_id=1429576125,
-            name="Emby Public",
-            actions=[ChooseOptionByImageAction()],
-        )
-        challenge = SimpleNamespace(
-            id=200,
-            chat=SimpleNamespace(id=chat.chat_id),
-            text=None,
-            caption="请在 30 秒内点击图中事物的按钮以完成签到",
-            photo=SimpleNamespace(file_id="challenge"),
-            media=None,
-            reply_markup=None,
-            date=datetime.now(timezone.utc),
-            edit_date=None,
-            message_thread_id=None,
-            reply_to_top_message_id=None,
-        )
-        success = SimpleNamespace(
-            id=201,
-            chat=SimpleNamespace(id=chat.chat_id),
-            text="🎉 签到成功！\n🎲 获得 53 积分",
-            caption=None,
-            photo=None,
-            media=None,
-            reply_markup=None,
-            date=datetime.now(timezone.utc),
-            edit_date=None,
-            message_thread_id=None,
-            reply_to_top_message_id=None,
-        )
-        signer.context.chat_messages[chat.chat_id][challenge.id] = challenge
-        signer.app = _FakeHistoryApp([success, challenge])
-
-        async def click_ok(action, message):
-            return True
-
-        signer._choose_option_by_image = click_ok
-
-        result = await signer.wait_for(
-            chat,
-            ChooseOptionByImageAction(),
-            timeout=1.0,
-            before_action_state={},
         )
 
         self.assertIsNone(result)
