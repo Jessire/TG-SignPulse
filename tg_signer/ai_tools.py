@@ -59,9 +59,7 @@ DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT = (
     "Return plain text only, no markdown, no explanation."
 )
 
-DEFAULT_CALCULATE_PROBLEM_PROMPT = (
-    "你是一个**答题助手**，可以根据用户的问题给出正确的回答，只需要回复答案，不要解释，不要输出任何其他内容。"
-)
+DEFAULT_CALCULATE_PROBLEM_PROMPT = "你是一个**答题助手**，可以根据用户的问题给出正确的回答，只需要回复答案，不要解释，不要输出任何其他内容。"
 
 
 def encode_image(image: bytes):
@@ -69,6 +67,10 @@ def encode_image(image: bytes):
 
 
 logger = logging.getLogger("tg-signer")
+
+
+class _RetryableAIResponseError(RuntimeError):
+    pass
 
 
 class OpenAIConfig(TypedDict, total=False):
@@ -216,7 +218,9 @@ class AITools:
 
         for line in lines:
             lowered = line.lower()
-            if any(hint in line or hint in lowered for hint in cls._QUESTION_LINE_HINTS):
+            if any(
+                hint in line or hint in lowered for hint in cls._QUESTION_LINE_HINTS
+            ):
                 return line[:160]
         return lines[0][:160]
 
@@ -282,10 +286,26 @@ class AITools:
     def _format_option_lines(options: list[tuple[int, str]]) -> str:
         return "\n".join(f"{index}. {text}" for index, text in options)
 
+    @staticmethod
+    def _with_option_output_contract(system_prompt: str, *, multiple: bool) -> str:
+        if multiple:
+            contract = (
+                'Return JSON only: {"options":[1]}. Use only 1-based indexes '
+                "from the provided button list. Return no explanation or markdown."
+            )
+        else:
+            contract = (
+                'Return JSON only: {"option":1}. Use only a 1-based index '
+                "from the provided option list. Return no explanation or markdown."
+            )
+        return f"{system_prompt.strip()}\n\nOutput contract: {contract}"
+
     def _format_image_url(self, image: bytes) -> str:
         encoded_image = encode_image(image)
         # Zhipu GLM vision endpoints expect raw base64 in image_url.url.
-        if any(host in self.base_url.lower() for host in ("open.bigmodel.cn", "api.z.ai")):
+        if any(
+            host in self.base_url.lower() for host in ("open.bigmodel.cn", "api.z.ai")
+        ):
             return encoded_image
         return f"data:image/jpeg;base64,{encoded_image}"
 
@@ -298,7 +318,18 @@ class AITools:
             if isinstance(result.get("options"), list) and result["options"]:
                 result = result["options"][0]
             else:
-                for key in ("option", "index", "choice", "answer", "button", "text"):
+                for key in (
+                    "option",
+                    "selected_option",
+                    "selected_button",
+                    "index",
+                    "choice",
+                    "answer",
+                    "button",
+                    "text",
+                    "label",
+                    "value",
+                ):
                     if key in result:
                         result = result[key]
                         break
@@ -326,7 +357,9 @@ class AITools:
         raise ValueError(f"Could not parse AI option result: {result}")
 
     @classmethod
-    def _coerce_option_indexes(cls, result: Any, options: list[tuple[int, str]]) -> list[int]:
+    def _coerce_option_indexes(
+        cls, result: Any, options: list[tuple[int, str]]
+    ) -> list[int]:
         if isinstance(result, list):
             if len(result) == 1 and isinstance(result[0], dict):
                 result = result[0]
@@ -334,9 +367,18 @@ class AITools:
                 return [cls._coerce_option_index(item, options) for item in result]
 
         if isinstance(result, dict):
-            raw_options = result.get("options")
-            if raw_options is None:
-                raw_options = result.get("option")
+            raw_options = None
+            for key in (
+                "options",
+                "selected_options",
+                "selected_buttons",
+                "option",
+                "selected_option",
+                "selected_button",
+            ):
+                if key in result:
+                    raw_options = result[key]
+                    break
             if raw_options is not None:
                 if not isinstance(raw_options, list):
                     raw_options = [raw_options]
@@ -421,25 +463,90 @@ class AITools:
             base_delay = 0.6
         return max(0.0, base_delay) * attempt
 
-    async def _call_visual_completion_with_retries(self, client: "AsyncOpenAI", kwargs):
+    @staticmethod
+    def _completion_content(completion) -> str:
+        try:
+            content = completion.choices[0].message.content
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise _RetryableAIResponseError(
+                "AI provider returned a completion without message content"
+            ) from exc
+
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(getattr(item, "text", None), str):
+                    parts.append(item.text)
+            text = "\n".join(parts).strip()
+        else:
+            text = ""
+
+        if not text:
+            raise _RetryableAIResponseError(
+                "AI provider returned empty message content"
+            )
+        return text
+
+    @classmethod
+    def _parse_option_indexes_completion(
+        cls, completion, options: list[tuple[int, str]]
+    ) -> list[int]:
+        content = cls._completion_content(completion)
+        try:
+            result = json_repair.loads(content)
+            indexes = cls._coerce_option_indexes(result, options)
+        except (TypeError, ValueError) as exc:
+            if content.lstrip().startswith(("{", "[")):
+                raise _RetryableAIResponseError(
+                    "AI response could not be mapped to a provided option: "
+                    f"{content[:200]!r}"
+                ) from exc
+            try:
+                indexes = cls._coerce_option_indexes(content, options)
+            except (TypeError, ValueError) as text_exc:
+                raise _RetryableAIResponseError(
+                    "AI response could not be mapped to a provided option: "
+                    f"{content[:200]!r}"
+                ) from text_exc
+
+        valid_indexes = {0, *(index for index, _ in options)}
+        if not indexes or any(index not in valid_indexes for index in indexes):
+            raise _RetryableAIResponseError(
+                "AI response selected an option outside the provided list: "
+                f"{content[:200]!r}"
+            )
+        return indexes
+
+    async def _call_visual_completion_with_retries(
+        self, client: "AsyncOpenAI", kwargs, response_parser=None
+    ):
         attempts = self._vision_retry_attempts()
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                return await asyncio.wait_for(
+                completion = await asyncio.wait_for(
                     client.chat.completions.create(**kwargs),
                     timeout=self._ai_timeout(),
                 )
+                if response_parser is not None:
+                    return response_parser(completion)
+                return completion
             except Exception as exc:
                 last_error = exc
-                if (
-                    attempt >= attempts
-                    or not self._should_retry_transient_ai_error(exc)
+                if attempt >= attempts or not (
+                    isinstance(exc, _RetryableAIResponseError)
+                    or self._should_retry_transient_ai_error(exc)
                 ):
                     raise
                 delay = self._vision_retry_delay(attempt)
                 logger.warning(
-                    "Transient AI provider error, retrying visual request "
+                    "Retryable AI visual response error, retrying request "
                     "(attempt %s/%s, delay %.1fs): %s",
                     attempt + 1,
                     attempts,
@@ -459,6 +566,7 @@ class AITools:
         temperature: float,
         max_tokens: int,
         expect_json: bool,
+        response_parser=None,
     ):
         kwargs = {
             "messages": messages,
@@ -471,7 +579,9 @@ class AITools:
             kwargs["response_format"] = {"type": "json_object"}
 
         try:
-            return await self._call_visual_completion_with_retries(client, kwargs)
+            return await self._call_visual_completion_with_retries(
+                client, kwargs, response_parser=response_parser
+            )
         except Exception as exc:
             if not expect_json or not self._should_retry_without_json_mode(exc):
                 raise
@@ -480,7 +590,9 @@ class AITools:
                 exc,
             )
             kwargs.pop("response_format", None)
-            return await self._call_visual_completion_with_retries(client, kwargs)
+            return await self._call_visual_completion_with_retries(
+                client, kwargs, response_parser=response_parser
+            )
 
     async def choose_option_by_image(
         self,
@@ -492,14 +604,16 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> int:
-        sys_prompt = (system_prompt or "").strip() or DEFAULT_CHOOSE_OPTION_BY_IMAGE_PROMPT
+        custom_prompt = (system_prompt or "").strip()
+        sys_prompt = custom_prompt or DEFAULT_CHOOSE_OPTION_BY_IMAGE_PROMPT
+        if custom_prompt:
+            sys_prompt = self._with_option_output_contract(sys_prompt, multiple=False)
         client = client or self.client
         model = model or self.default_model
         image = self._prepare_vision_image(image)
         query = self._extract_relevant_query(query) or "选择最符合图片的选项"
         text_query = (
-            f"Question:\n{query}\n\n"
-            f"Options:\n{self._format_option_lines(options)}"
+            f"Question:\n{query}\n\nOptions:\n{self._format_option_lines(options)}"
         )
         messages = [
             {"role": "system", "content": sys_prompt},
@@ -509,24 +623,23 @@ class AITools:
                     {"type": "text", "text": text_query},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": self._format_image_url(image)
-                        },
+                        "image_url": {"url": self._format_image_url(image)},
                     },
                 ],
             },
         ]
-        completion = await self._create_visual_completion(
+        result_indexes = await self._create_visual_completion(
             client=client,
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=2048,
             expect_json=True,
+            response_parser=lambda completion: self._parse_option_indexes_completion(
+                completion, options
+            ),
         )
-        message = completion.choices[0].message
-        result = json_repair.loads(message.content)
-        return self._coerce_option_index(result, options)
+        return result_indexes[0]
 
     async def choose_options_by_image(
         self,
@@ -538,8 +651,9 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> list[int]:
-        if (system_prompt or "").strip():
-            sys_prompt = system_prompt.strip()
+        custom_prompt = (system_prompt or "").strip()
+        if custom_prompt:
+            sys_prompt = self._with_option_output_contract(custom_prompt, multiple=True)
         elif self._looks_like_single_object_choice(query, options):
             sys_prompt = DEFAULT_SINGLE_OBJECT_CHOICE_PROMPT
         else:
@@ -560,23 +674,22 @@ class AITools:
                     {"type": "text", "text": text_query},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": self._format_image_url(image)
-                        },
+                        "image_url": {"url": self._format_image_url(image)},
                     },
                 ],
             },
         ]
-        completion = await self._create_visual_completion(
+        return await self._create_visual_completion(
             client=client,
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=2048,
             expect_json=True,
+            response_parser=lambda completion: self._parse_option_indexes_completion(
+                completion, options
+            ),
         )
-        result = json_repair.loads(completion.choices[0].message.content)
-        return self._coerce_option_indexes(result, options)
 
     async def extract_text_by_image(
         self,
@@ -587,7 +700,9 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> str:
-        sys_prompt = (system_prompt or "").strip() or DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT
+        sys_prompt = (
+            system_prompt or ""
+        ).strip() or DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT
         client = client or self.client
         model = model or self.default_model
         text_query = query or "Extract the key text from this image."
@@ -599,9 +714,7 @@ class AITools:
                     {"type": "text", "text": text_query},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": self._format_image_url(image)
-                        },
+                        "image_url": {"url": self._format_image_url(image)},
                     },
                 ],
             },
