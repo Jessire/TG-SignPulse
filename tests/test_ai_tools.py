@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from tg_signer.ai_tools import AITools
 from tg_signer.config import ReplyByImageRecognitionAction, SignChatV3
+from tg_signer.ai_tools import AITools
 from tg_signer.core import UserSigner, _is_callback_confirmation_unavailable
 
 
@@ -19,25 +19,21 @@ class AIToolsOptionParsingTest(unittest.TestCase):
         self.assertEqual(AITools._coerce_option_index([{"option": 4}], self.options), 4)
 
     def test_coerce_option_index_accepts_answer_text(self):
-        self.assertEqual(
-            AITools._coerce_option_index({"answer": "mask"}, self.options), 4
-        )
+        self.assertEqual(AITools._coerce_option_index({"answer": "mask"}, self.options), 4)
 
     def test_coerce_option_index_accepts_selected_button_text(self):
         self.assertEqual(
-            AITools._coerce_option_index({"selected_button": "mask"}, self.options),
+            AITools._coerce_option_index(
+                {"selected_button": "mask"}, self.options
+            ),
             4,
         )
 
     def test_coerce_option_indexes_accepts_list_payload(self):
-        self.assertEqual(
-            AITools._coerce_option_indexes([{"options": [4]}], self.options), [4]
-        )
+        self.assertEqual(AITools._coerce_option_indexes([{"options": [4]}], self.options), [4])
 
     def test_coerce_option_indexes_accepts_text_payload(self):
-        self.assertEqual(
-            AITools._coerce_option_indexes({"answer": "mask"}, self.options), [4]
-        )
+        self.assertEqual(AITools._coerce_option_indexes({"answer": "mask"}, self.options), [4])
 
     def test_coerce_option_index_rejects_unknown_response(self):
         with self.assertRaises(ValueError):
@@ -281,7 +277,9 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
         fake_completions = _FakeCompletions(
             [
                 SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content="banana"))]
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content="banana"))
+                    ]
                 )
             ]
         )
@@ -335,9 +333,7 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
                     [(1, "apple"), (2, "banana")],
                 )
 
-                image_url = fake_completions.calls[0]["messages"][1]["content"][1][
-                    "image_url"
-                ]["url"]
+                image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
                 self.assertEqual(image_url, "ZmFrZS1pbWFnZQ==")
 
     async def test_standard_base_url_sends_data_url_image_url(self):
@@ -370,17 +366,13 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
             [(1, "apple"), (2, "banana")],
         )
 
-        image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"][
-            "url"
-        ]
+        image_url = fake_completions.calls[0]["messages"][1]["content"][1]["image_url"]["url"]
         self.assertEqual(image_url, "data:image/jpeg;base64,ZmFrZS1pbWFnZQ==")
 
     async def test_choose_options_by_image_retries_without_json_mode(self):
         fake_completions = _FakeCompletions(
             [
-                RuntimeError(
-                    "Error code: 403 - {'message': 'openai_error', 'code': 'bad_response_status_code', 'detail': 'response_format json_object unsupported'}"
-                ),
+                RuntimeError("Error code: 403 - {'message': 'openai_error', 'code': 'bad_response_status_code', 'detail': 'response_format json_object unsupported'}"),
                 SimpleNamespace(
                     choices=[
                         SimpleNamespace(
@@ -439,7 +431,9 @@ class AIToolsJsonFallbackTest(unittest.IsolatedAsyncioTestCase):
             [
                 RuntimeError("Error code: 503 - {'error': {'status': 'UNAVAILABLE'}}"),
                 SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content="bxtG"))]
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content="bxtG"))
+                    ]
                 ),
             ]
         )

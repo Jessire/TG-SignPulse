@@ -59,7 +59,9 @@ DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT = (
     "Return plain text only, no markdown, no explanation."
 )
 
-DEFAULT_CALCULATE_PROBLEM_PROMPT = "你是一个**答题助手**，可以根据用户的问题给出正确的回答，只需要回复答案，不要解释，不要输出任何其他内容。"
+DEFAULT_CALCULATE_PROBLEM_PROMPT = (
+    "你是一个**答题助手**，可以根据用户的问题给出正确的回答，只需要回复答案，不要解释，不要输出任何其他内容。"
+)
 
 
 def encode_image(image: bytes):
@@ -218,9 +220,7 @@ class AITools:
 
         for line in lines:
             lowered = line.lower()
-            if any(
-                hint in line or hint in lowered for hint in cls._QUESTION_LINE_HINTS
-            ):
+            if any(hint in line or hint in lowered for hint in cls._QUESTION_LINE_HINTS):
                 return line[:160]
         return lines[0][:160]
 
@@ -303,9 +303,7 @@ class AITools:
     def _format_image_url(self, image: bytes) -> str:
         encoded_image = encode_image(image)
         # Zhipu GLM vision endpoints expect raw base64 in image_url.url.
-        if any(
-            host in self.base_url.lower() for host in ("open.bigmodel.cn", "api.z.ai")
-        ):
+        if any(host in self.base_url.lower() for host in ("open.bigmodel.cn", "api.z.ai")):
             return encoded_image
         return f"data:image/jpeg;base64,{encoded_image}"
 
@@ -357,9 +355,7 @@ class AITools:
         raise ValueError(f"Could not parse AI option result: {result}")
 
     @classmethod
-    def _coerce_option_indexes(
-        cls, result: Any, options: list[tuple[int, str]]
-    ) -> list[int]:
+    def _coerce_option_indexes(cls, result: Any, options: list[tuple[int, str]]) -> list[int]:
         if isinstance(result, list):
             if len(result) == 1 and isinstance(result[0], dict):
                 result = result[0]
@@ -539,9 +535,12 @@ class AITools:
                 return completion
             except Exception as exc:
                 last_error = exc
-                if attempt >= attempts or not (
-                    isinstance(exc, _RetryableAIResponseError)
-                    or self._should_retry_transient_ai_error(exc)
+                if (
+                    attempt >= attempts
+                    or not (
+                        isinstance(exc, _RetryableAIResponseError)
+                        or self._should_retry_transient_ai_error(exc)
+                    )
                 ):
                     raise
                 delay = self._vision_retry_delay(attempt)
@@ -607,13 +606,16 @@ class AITools:
         custom_prompt = (system_prompt or "").strip()
         sys_prompt = custom_prompt or DEFAULT_CHOOSE_OPTION_BY_IMAGE_PROMPT
         if custom_prompt:
-            sys_prompt = self._with_option_output_contract(sys_prompt, multiple=False)
+            sys_prompt = self._with_option_output_contract(
+                sys_prompt, multiple=False
+            )
         client = client or self.client
         model = model or self.default_model
         image = self._prepare_vision_image(image)
         query = self._extract_relevant_query(query) or "选择最符合图片的选项"
         text_query = (
-            f"Question:\n{query}\n\nOptions:\n{self._format_option_lines(options)}"
+            f"Question:\n{query}\n\n"
+            f"Options:\n{self._format_option_lines(options)}"
         )
         messages = [
             {"role": "system", "content": sys_prompt},
@@ -623,7 +625,9 @@ class AITools:
                     {"type": "text", "text": text_query},
                     {
                         "type": "image_url",
-                        "image_url": {"url": self._format_image_url(image)},
+                        "image_url": {
+                            "url": self._format_image_url(image)
+                        },
                     },
                 ],
             },
@@ -653,7 +657,9 @@ class AITools:
     ) -> list[int]:
         custom_prompt = (system_prompt or "").strip()
         if custom_prompt:
-            sys_prompt = self._with_option_output_contract(custom_prompt, multiple=True)
+            sys_prompt = self._with_option_output_contract(
+                custom_prompt, multiple=True
+            )
         elif self._looks_like_single_object_choice(query, options):
             sys_prompt = DEFAULT_SINGLE_OBJECT_CHOICE_PROMPT
         else:
@@ -674,7 +680,9 @@ class AITools:
                     {"type": "text", "text": text_query},
                     {
                         "type": "image_url",
-                        "image_url": {"url": self._format_image_url(image)},
+                        "image_url": {
+                            "url": self._format_image_url(image)
+                        },
                     },
                 ],
             },
@@ -700,9 +708,7 @@ class AITools:
         system_prompt: str | None = None,
         temperature=0.1,
     ) -> str:
-        sys_prompt = (
-            system_prompt or ""
-        ).strip() or DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT
+        sys_prompt = (system_prompt or "").strip() or DEFAULT_EXTRACT_TEXT_BY_IMAGE_PROMPT
         client = client or self.client
         model = model or self.default_model
         text_query = query or "Extract the key text from this image."
@@ -714,7 +720,9 @@ class AITools:
                     {"type": "text", "text": text_query},
                     {
                         "type": "image_url",
-                        "image_url": {"url": self._format_image_url(image)},
+                        "image_url": {
+                            "url": self._format_image_url(image)
+                        },
                     },
                 ],
             },
